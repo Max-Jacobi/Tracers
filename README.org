@@ -1,0 +1,4 @@
+* Tracer particles
+
+Integrate output from any hydro simulations in either time direction.
+The interpolator is the only part that needs to be implemented for a new type of simulation output.
