@@ -32,7 +32,6 @@ class AthdfFile:
             vars_in_file = list(f.attrs['VariableNames'][:].astype(str))
             nmb: int = int(f.attrs["NumMeshBlocks"])
             mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
-            mb_size = mb_size[:2]
             mem_size = 8*nmb*int(np.prod(mb_size))
 
             # assume all grid functions are in the first dataset
@@ -47,22 +46,19 @@ class AthdfFile:
                 self.shared_memory[key] = shm.name
                 data: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
                 j = vars_in_file.index(key)
-                data[:] = f[dset][j, :, 0]
-                # data[:] = f[dset][j]
+                data[:] = f[dset][j]
 
             self.x1 = np.array(f['x1v'][:])
             self.x2 = np.array(f['x2v'][:])
-            # x3 = f['x2v'][:]
+            self.x3 = np.array(f['x3v'][:])
             o1 = self.x1[:, 0]
             o2 = self.x2[:, 0]
-            # o3 = x3[:, 0]
+            o3 = self.x3[:, 0]
             d1 = self.x1[:, 1] - o1
             d2 = self.x2[:, 1] - o2
-            # d3 = x3[:, 1] - o3
-            # self.origins = np.array([o3, o2, o1]).T
-            # self.ih = 1/np.array([d3, d2, d1]).T
-            self.origins = np.array([o2, o1]).T
-            self.ih = 1/np.array([d2, d1]).T
+            d3 = self.x3[:, 1] - o3
+            self.origins = np.array([o3, o2, o1]).T
+            self.ih = 1/np.array([d3, d2, d1]).T
 
     def get_mb_data(
         self,
@@ -78,14 +74,11 @@ class AthdfFile:
         if sum(mask) == 0:
             raise InterpolationError(f"Point {x} is out of bounds.")
         idx = np.where(mask)[0][0]
-        # return self.origins[idx], self.ih[idx], idx
         return idx
 
     def interpolate(self, x: np.ndarray, keys: tuple[str, ...]) -> np.ndarray:
-        # o, ih, imb = self.get_mb_data(x)
         imb = self.get_mb_data(x)
-        xx = (self.x2[imb], self.x1[imb])
-        # data = np.empty((len(keys), *self.shape))
+        xx = (self.x3[imb], self.x2[imb], self.x1[imb])
         res = np.empty(len(keys))
         for ii, key in enumerate(keys):
             shm = SharedMemory(name=self.shared_memory[key])
@@ -98,12 +91,11 @@ class AthdfFile:
             try:
                 shm = SharedMemory(name=name)
             except FileNotFoundError:
-                print(f"Could not find shared memory for {key} in section {ii}")
+                print(f"Could not find shared memory for {key}")
                 continue
             shm.close()
             shm.unlink()
         self.shared_memory = {}
-
 
     def __repr__(self):
         return f"AthdfFile({self.filename})"
@@ -114,10 +106,8 @@ class AthdfFile:
 ################################################################################
 
 class AthdfInterpolator(Interpolator):
-    # coord_keys = ('x3', 'x2', 'x1')
-    # vel_keys = ('vel3', 'vel2', 'vel1')
-    coord_keys = ('x2', 'x1')
-    vel_keys = ('vel2', 'vel1')
+    coord_keys = ('x3', 'x2', 'x1')
+    vel_keys = ('vel3', 'vel2', 'vel1')
     data: tuple
 
     def __init__(
@@ -264,8 +254,7 @@ class AthdfInterpolator(Interpolator):
 
 class AthdfTracers(Tracers):
     interpolator: AthdfInterpolator
-    # vel_keys: tuple[str, ...] = ('vel3', 'vel2', 'vel1')
-    vel_keys: tuple[str, ...] = ('vel2', 'vel1')
+    vel_keys: tuple[str, ...] = ('vel3', 'vel2', 'vel1')
 
     def __init__(
         self,
