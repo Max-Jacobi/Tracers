@@ -37,30 +37,33 @@ class Tracer(Mapping):
 
         if sol.success and len(sol.t) > 0:
             self.pos = sol.y[:, -1]
-
-            for i in range(2, len(sol.t)):
-                self.dt = sol.t[-i] - sol.t[-i-1]
-                if self.dt != 0:
+            for ii, tv in enumerate(sol.t_events):
+                if len(tv) > 0:
+                    self.finished = True
+                    self.message = f"event {ii} reached"
                     break
-            else:
-                self.dt = None
-                return
-
-            if self.dt > 0:
-                new = sol.t > self.trajectory['time'][-1]
-            else:
-                self.dt *= -1
-                new = sol.t < self.trajectory['time'][-1]
-            self.trajectory['time'] = np.append(self.trajectory['time'], sol.t[new])
-
-
-            for ix, key in enumerate(self.coord_keys):
-                self.trajectory[key] = np.append(self.trajectory[key], sol.y[ix][new])
-
         elif not sol.success:
             self.failed = True
             self.finished = True
             self.message = sol.message
+
+        for i in range(2, len(sol.t)):
+            self.dt = sol.t[-i] - sol.t[-i-1]
+            if self.dt != 0:
+                break
+        else:
+            self.dt = None
+
+        if self.dt > 0:
+            new = sol.t > self.trajectory['time'][-1]
+        else:
+            self.dt *= -1
+            new = sol.t < self.trajectory['time'][-1]
+        self.trajectory['time'] = np.append(self.trajectory['time'], sol.t[new])
+
+        for ix, key in enumerate(self.coord_keys):
+            self.trajectory[key] = np.append(self.trajectory[key], sol.y[ix][new])
+
 
     def handle_error(self, error: Exception) -> None:
         self.failed = True

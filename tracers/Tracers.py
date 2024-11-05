@@ -123,13 +123,22 @@ class Tracers:
     def check_end_conditions(self):
 
         for ii, end_condition in enumerate(self.end_conditions):
-            self.tracers = list(map(end_condition, self.tracers))
+            #self.tracers = list(map(end_condition, self.tracers))
+            self.tracers = do_parallel(
+                func=end_condition,
+                args=self.tracers,
+                desc=f"Checking condition {ii+1}/{len(self.end_condition)}",
+                unit='tracer',
+                n_cpu=self.n_cpu,
+                verbose=self.verbose,
+            )
 
         if self.verbose:
-            running = sum(tracer.started and not tracer.finished
-                          for tracer in self.tracers)
-            finished = sum(tracer.finished for tracer in self.tracers)
-            failed = sum(tracer.failed for tracer in self.tracers)
+            running = sum(tr.started and not tr.finished
+                          for tr in self.tracers)
+            finished = sum(tr.finished and not tr.failed
+                           for tr in self.tracers)
+            failed = sum(tr.failed for tr in self.tracers)
             print(f"running: {running}, finished: {finished}, failed: {failed}")
 
 
@@ -139,8 +148,6 @@ class Tracers:
             raise ValueError(
                 f"Gap between last step {self.last_time} and current step {t_span}"
             )
-        if self.verbose:
-            print(f"Loading data for t = {t_span[0]:.0f} - {t_span[1]:.0f}")
         self.interpolator.load_data(t_span)
         self.integrate_step(t_span)
         self.interpolate_step(t_span)
