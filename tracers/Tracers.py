@@ -1,4 +1,5 @@
-from typing import Callable, Iterable
+from typing import Callable, Any
+
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -12,7 +13,7 @@ class Tracers:
 
     def __init__(
         self,
-        seeds: dict[str, np.ndarray],
+        seeds: dict[str, Any],
         interpolator: Interpolator,
         n_cpu: int = 1,
         verbose: bool = False,
@@ -40,7 +41,10 @@ class Tracers:
     def init_tracers(self):
         time = self.seeds['time']
         coords = [self.seeds[key] for key in self.coord_keys]
-        self.tracers =  [Tracer(pos, t, ii, self.coord_keys, self.data_keys)
+        props = {key: self.seeds[key] for key in self.seeds
+                 if key not in self.coord_keys and key != 'time'}
+
+        self.tracers =  [Tracer(pos, t, ii, self.coord_keys, self.data_keys, props=props)
                          for ii, (*pos, t) in enumerate(zip(*coords, time))]
 
     @staticmethod

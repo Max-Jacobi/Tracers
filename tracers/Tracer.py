@@ -1,4 +1,4 @@
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Any
 import numpy as np
 from scipy.integrate._ivp.ivp import OdeResult
 from collections.abc import  Mapping
@@ -11,6 +11,7 @@ class Tracer(Mapping):
         index: int,
         coord_keys: tuple[str, ...],
         data_keys: tuple[str, ...],
+        props: None | dict[str, Any] = None,
     ):
         self.pos_start = np.array(pos_start)
         self.t_start = t_start
@@ -24,6 +25,8 @@ class Tracer(Mapping):
         self.started = False
         self.finished = False
         self.failed = False
+
+        self.props = dict() if props is None else props
 
         self.trajectory = {key: np.array([x_ini])
                            for key, x_ini in zip(coord_keys, pos_start)}
@@ -53,6 +56,7 @@ class Tracer(Mapping):
                 break
         else:
             self.dt = None
+            return
 
         if self.dt > 0:
             new = sol.t > self.trajectory['time'][-1]
@@ -69,6 +73,19 @@ class Tracer(Mapping):
         self.failed = True
         self.finished = True
         self.message = str(error)
+
+    def output_to_ascii(self, filebase: str) -> None:
+        props = "; ".join((f"{key}={val}" for key, val in self.props.items()))
+        legend = "8s" + " 12.6f" * (len(self.coord_keys)+len(self.data_keys))
+        legend = legend.format("time", *self.coord_keys, *self.data_keys)
+        header = f"{props}\nmessage: {self.message}\n{legend}"
+        filename = f"{filebase}_{self.id}.dat"
+
+        np.savetxt(filename, np.column_stack(
+            [self.trajectory[key] for key in ['time', *self.coord_keys, *self.data_keys]]),
+            header=header)
+
+
 
     def __getitem__(self, key: str) -> np.ndarray:
         return self.trajectory[key]
