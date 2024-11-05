@@ -74,17 +74,21 @@ class Tracer(Mapping):
         self.finished = True
         self.message = str(error)
 
-    def output_to_ascii(self, filebase: str) -> None:
+    def output_to_ascii(self, filebase: str) -> str:
+        keys = ['time', *self.coord_keys, *self.data_keys]
+
         props = "; ".join((f"{key}={val}" for key, val in self.props.items()))
-        legend = "8s" + " 12.6f" * (len(self.coord_keys)+len(self.data_keys))
-        legend = legend.format("time", *self.coord_keys, *self.data_keys)
+        legend = "8s" + " 12.6f" * (len(keys) - 1)
+        legend = legend.format(*keys)
         header = f"{props}\nmessage: {self.message}\n{legend}"
+
         filename = f"{filebase}_{self.id}.dat"
 
-        np.savetxt(filename, np.column_stack(
-            [self.trajectory[key] for key in ['time', *self.coord_keys, *self.data_keys]]),
-            header=header)
+        tsort = np.argsort(self.trajectory['time'])
+        data = np.column_stack([self.trajectory[key][tsort] for key in keys])
 
+        np.savetxt(filename, data, header=header)
+        return filename
 
 
     def __getitem__(self, key: str) -> np.ndarray:

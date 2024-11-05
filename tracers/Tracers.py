@@ -1,6 +1,5 @@
 from typing import Callable, Any
 
-
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
@@ -19,7 +18,6 @@ class Tracers:
         verbose: bool = False,
         end_conditions: list[Callable[[Tracer], Tracer]] = [],
         **kwargs,
-
     ):
         self.coord_keys = interpolator.coord_keys
         self.data_keys = interpolator.data_keys
