@@ -9,9 +9,7 @@ import h5py as h5
 from numba import njit
 from scipy.interpolate import RegularGridInterpolator, interp1d
 
-from .import Tracers, Interpolator
-from .Tracers import InterpolationError
-from .utils import do_parallel
+from . import Tracers, Interpolator, do_parallel
 
 ################################################################################
 
@@ -75,7 +73,6 @@ class AthdfFile:
         mask = np.all(diff >= 0, axis=1)
         mask = mask & np.all(diff < np.array(self.shape)[None, :] - 1, axis=1)
         if sum(mask) == 0:
-            #raise InterpolationError(f"Point {x} is out of bounds.")
             return -1
         idx = np.where(mask)[0][0]
         return idx
