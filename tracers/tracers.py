@@ -320,5 +320,8 @@ class Tracers:
     def __iter__(self):
         return self.tracers.__iter__()
 
+    def  __len__(self):
+        return len(self.tracers)
+
 class InterpolationError(Exception):
     pass
