@@ -2,6 +2,7 @@ from typing import Callable, Any, Iterable, Iterator, Any, Sequence
 from collections.abc import  Mapping
 from abc import ABC, abstractmethod
 from multiprocessing import Pool
+from sys import stdout
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -100,16 +101,27 @@ class Tracer(Mapping):
         keys = ['time', *self.coord_keys, *self.data_keys]
 
         props = "; ".join((f"{key}={val}" for key, val in self.props.items()))
-        legend = "8s" + " 12.6f" * (len(keys) - 1)
+        legend = "{:>23s}" + "{:>26s}"* (len(keys) - 1)
         legend = legend.format(*keys)
         header = f"{props}\nmessage: {self.message}\n{legend}"
 
-        filename = f"{filebase}_{self.id}.dat"
+        filename = f"{filebase}{self.id:06d}.dat"
+
 
         tsort = np.argsort(self.trajectory['time'])
+
+        incmp = False
+        for key, dd in self.trajectory.items():
+            if len(dd) != len(tsort):
+                incmp = True
+                print(f"Warning for tracer_{self.id}: len({key}):{len(dd)} /= len(time):{len(tsort)}")
+                print(f"Message: {self.message}")
+        if incmp:
+            return "failed"
+
         data = np.column_stack([self.trajectory[key][tsort] for key in keys])
 
-        np.savetxt(filename, data, header=header)
+        np.savetxt(filename, data, header=header, fmt="%25.16e")
         return filename
 
 
@@ -251,11 +263,10 @@ class Tracers:
         args: tuple[Tracer, Interpolator, tuple[float, float]]
     ) -> Tracer:
         tracer, interpolator, t_span = args
-        for tt, *pos in zip(*(tracer.trajectory[key]
-                              for key in ("time", *interpolator.coord_keys))):
-            if not (min(*t_span) <= tt <= max(*t_span)):
-                continue
+        i_new = len(tracer.trajectory[interpolator.data_keys[0]])
 
+        for tt, *pos in zip(*(tracer.trajectory[key][i_new:]
+                              for key in ("time", *interpolator.coord_keys))):
             try:
                 data = interpolator.interpolate_data(tt, np.array(pos), interpolator.data)
                 for key, value in zip(interpolator.data_keys, data):

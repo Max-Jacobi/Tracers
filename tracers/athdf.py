@@ -42,14 +42,15 @@ class AthdfFile:
             self.x1 = np.array(f['x1v'][:])
             self.x2 = np.array(f['x2v'][:])
             self.x3 = np.array(f['x3v'][:])
-            o1 = self.x1[:, 0]
-            o2 = self.x2[:, 0]
-            o3 = self.x3[:, 0]
-            d1 = self.x1[:, 1] - o1
-            d2 = self.x2[:, 1] - o2
-            d3 = self.x3[:, 1] - o3
-            self.origins = np.array([o3, o2, o1]).T
-            self.ih = 1/np.array([d3, d2, d1]).T
+            o1 = self.x1[:, 1]
+            o2 = self.x2[:, 1]
+            o3 = self.x3[:, 1]
+            e1 = self.x1[:, -2]
+            e2 = self.x2[:, -2]
+            e3 = self.x3[:, -2]
+
+            self.origins = np.array([o3, o2, o1])
+            self.ends = np.array([e3, e2, e1])
 
 
             for key in self.keys:
@@ -69,9 +70,10 @@ class AthdfFile:
         Get the mesh block data for a given point.
         Returns origin, inverse cell widths, and mesh block index.
         """
-        diff = (x[None, :] - self.origins)*self.ih
-        mask = np.all(diff >= 0, axis=1)
-        mask = mask & np.all(diff < np.array(self.shape)[None, :] - 1, axis=1)
+        mask = np.all(
+                (x[:, None] >= self.origins) &
+                (x[:, None] <= self.ends),
+                axis=0)
         if sum(mask) == 0:
             return -1
         idx = np.where(mask)[0][0]
@@ -95,12 +97,16 @@ class AthdfFile:
             return np.zeros_like(x)
 
         xx = (self.x3[imb], self.x2[imb], self.x1[imb])
+        assert self.x3[imb][0] < x[0] < self.x3[imb][-1], f"z({x[0]}) out of bounds({self.x3[imb][0]}:{self.x3[imb][-1]})"
+        assert self.x2[imb][0] < x[1] < self.x2[imb][-1], f"z({x[1]}) out of bounds({self.x2[imb][0]}:{self.x2[imb][-1]})"
+        assert self.x1[imb][0] < x[2] < self.x1[imb][-1], f"z({x[2]}) out of bounds({self.x1[imb][0]}:{self.x1[imb][-1]})"
+
         res = np.empty(len(keys))
         for ii, key in enumerate(keys):
             shm = SharedMemory(name=self.shared_memory[key])
             ar: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
             res[ii] = RegularGridInterpolator(xx, ar[imb])(x, method='linear')
-        if 'spherical' in self.coordinates:
+        if 'spherical' in self.coordinates and all(key.startswith('vel') for key in keys):
             # convert back to cartesian
             jac = _rotjac(theta, phi)
             res = jac @ res
@@ -161,6 +167,7 @@ class AthdfInterpolator(Interpolator):
         for ff in os.scandir(path):
             if not (ff.is_file() and ff.name.endswith('.athdf')):
                 continue
+
             with h5.File(ff.path, 'r') as f:
                 if not all(key in f.attrs['VariableNames'][:].astype(str)
                            for key in self.vel_keys+self.data_keys):
