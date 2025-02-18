@@ -245,7 +245,7 @@ class Tracers:
                 **kwargs
             )
             tracer.update_trajectory(sol)
-        except InterpolationError as er:
+        except (InterpolationError, TimeoutError) as er:
             tracer.handle_error(er)
         return tracer
 
@@ -278,7 +278,7 @@ class Tracers:
                 data = interpolator.interpolate_data(tt, np.array(pos), interpolator.data)
                 for key, value in zip(interpolator.data_keys, data):
                     tracer.trajectory[key] = np.append(tracer.trajectory[key], value)
-            except InterpolationError as er:
+            except (InterpolationError, Timeout) as er:
                 for key in tracer.trajectory.keys():
                     tracer.trajectory[key] = np.append(tracer.trajectory[key], np.nan)
 
