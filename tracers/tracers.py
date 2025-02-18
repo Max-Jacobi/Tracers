@@ -1,4 +1,5 @@
 from typing import Callable, Any, Iterable, Iterator, Any, Sequence
+from time import time
 from collections.abc import  Mapping
 from abc import ABC, abstractmethod
 from multiprocessing import Pool
@@ -13,6 +14,7 @@ def do_parallel(
     func: Callable,
     args: (Sequence | np.ndarray),
     n_cpu: int,
+    timeout: float = -1.0,
     verbose: bool = False,
     **kwargs
     ):
@@ -21,6 +23,8 @@ def do_parallel(
     kwargs["ncols"] = 0
     kwargs["file"] = stdout
 
+    if timeout > 0:
+        func = Timeout(func, timeout)
     if n_cpu == 1:
         return list(tqdm(map(func, args), **kwargs))
     with Pool(n_cpu) as pool:
@@ -188,6 +192,7 @@ class Tracers:
         n_cpu: int = 1,
         verbose: bool = False,
         end_conditions: list[Callable[[Tracer], Tracer]] = [],
+        timeout: float = -1.0,
         **kwargs,
     ):
         self.coord_keys = interpolator.coord_keys
@@ -197,6 +202,7 @@ class Tracers:
         self.n_cpu = n_cpu
         self.verbose = verbose
         self.end_conditions = end_conditions
+        self.timeout = timeout
         self.kwargs = kwargs
 
         assert all(key in self.seeds.keys() for key in self.coord_keys), \
@@ -244,7 +250,7 @@ class Tracers:
         return tracer
 
     def integrate_step(
-    self,
+        self,
         t_span: tuple[float, float],
     ) -> None:
 
@@ -256,6 +262,7 @@ class Tracers:
             unit='tracer',
             n_cpu=self.n_cpu,
             verbose=self.verbose,
+            timeout=self.timeout,
         )
 
     @staticmethod
@@ -289,20 +296,20 @@ class Tracers:
             unit='tracer',
             n_cpu=self.n_cpu,
             verbose=self.verbose,
+            timeout=self.timeout,
         )
 
 
     def check_end_conditions(self):
-
         for ii, end_condition in enumerate(self.end_conditions):
-            #self.tracers = list(map(end_condition, self.tracers))
             self.tracers = do_parallel(
                 func=end_condition,
                 args=self.tracers,
-                desc=f"Checking condition {ii+1}/{len(self.end_condition)}",
+                desc=f"Checking condition {ii+1}/{len(self.end_conditions)}",
                 unit='tracer',
                 n_cpu=self.n_cpu,
                 verbose=self.verbose,
+                timeout=self.timeout,
             )
 
         if self.verbose:
@@ -336,3 +343,21 @@ class Tracers:
 
 class InterpolationError(Exception):
     pass
+
+class TimeoutError(Exception):
+    pass
+
+class Timeout:
+    t_start: (None | float)
+
+    def __init__(self, func: Callable, timeout: float):
+        self.func = func
+        self.timeout = timeout
+        self.t_start = None
+
+    def __call__(self, *args, **kwargs):
+        if self.t_start is None:
+            self.t_start = time()
+        if (t := time() - self.t_start) > self.timeout:
+            raise TimeoutError(f"Tracer timed out after {t:.1f}s")
+        return self.func(*args, **kwargs)
