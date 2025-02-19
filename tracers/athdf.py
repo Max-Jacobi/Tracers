@@ -89,7 +89,7 @@ class AthdfFile:
             r = np.linalg.norm(x)
             theta = np.arccos(x[0]/r)
             phi = np.arctan2(x[1], x[2])
-            if phi < 0: phi = np.pi - phi
+            if phi < 0: phi = phi + np.pi*2
             x = np.array([phi, theta, r])
 
         imb = self.get_mb_data(x)
