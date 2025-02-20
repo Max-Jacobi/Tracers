@@ -216,11 +216,12 @@ class Tracers:
     def init_tracers(self):
         time = self.seeds['time']
         coords = [self.seeds[key] for key in self.coord_keys]
-        props = {key: self.seeds[key] for key in self.seeds
-                 if key not in self.coord_keys and key != 'time'}
+        prop_keys = [key for key in self.seeds
+                     if key not in self.coord_keys and key != 'time']
+        props = [{key: self.seeds[key][ii] for key in prop_keys} for ii in range(len(time))]
 
-        self.tracers =  [Tracer(pos, t, ii, self.coord_keys, self.data_keys, props=props)
-                         for ii, (*pos, t) in enumerate(zip(*coords, time))]
+        self.tracers =  [Tracer(pos, t, ii, self.coord_keys, self.data_keys, props=pp)
+                         for ii, (*pos, t, pp) in enumerate(zip(*coords, time, props))]
 
     @staticmethod
     def _integrate_inner(
@@ -278,7 +279,7 @@ class Tracers:
                 data = interpolator.interpolate_data(tt, np.array(pos), interpolator.data)
                 for key, value in zip(interpolator.data_keys, data):
                     tracer.trajectory[key] = np.append(tracer.trajectory[key], value)
-            except (InterpolationError, Timeout) as er:
+            except (InterpolationError, TimeoutError) as er:
                 for key in tracer.trajectory.keys():
                     tracer.trajectory[key] = np.append(tracer.trajectory[key], np.nan)
 
