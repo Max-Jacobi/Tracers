@@ -1,4 +1,4 @@
-from typing import Callable, Any, Iterable, Iterator, Any, Sequence
+from typing import Callable, Any, Iterable, Iterator, Any, Collection
 from time import time
 from collections.abc import  Mapping
 from abc import ABC, abstractmethod
@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 def do_parallel(
     func: Callable,
-    args: (Sequence | np.ndarray),
+    args: Collection,
     n_cpu: int,
     timeout: float = -1.0,
     verbose: bool = False,

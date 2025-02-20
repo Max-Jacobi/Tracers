@@ -79,7 +79,7 @@ class AthdfFile:
         idx = np.where(mask)[0][0]
         return idx
 
-    def interpolate(self, x: np.ndarray, keys: tuple[str, ...]) -> np.ndarray:
+    def interpolate(self, x: np.ndarray, key: str) -> float:
         if 'bitant' in self.coordinates:
             if (mirror_z := x[0] < 0):
                 x[0] = -x[0]
@@ -160,35 +160,36 @@ class AthdfInterpolator(Interpolator):
             raise ValueError(f"Time interpolation order {t_int_order} not implemented.")
         self.t_int_order = t_int_order
 
-
-        files: list[str] = []
-        times: list[float] = []
+        all_keys = self.vel_keys+self.data_keys
+        files: dict[str, list[str]] = {key: [] for key in all_keys}
+        times: dict[str, list[float]] = {key: [] for key in all_keys}
 
         for ff in os.scandir(path):
             if not (ff.is_file() and ff.name.endswith('.athdf')):
                 continue
 
             with h5.File(ff.path, 'r') as f:
-                if not all(key in f.attrs['VariableNames'][:].astype(str)
-                           for key in self.vel_keys+self.data_keys):
-                    continue
-                files.append(ff.path)
-                times.append(float(f.attrs['Time'][()]))
+                file_keys = f.attrs['VariableNames'][:].astype(str)
+                for key in all_keys:
+                    if key not in file_keys: continue
+                    files[key].append(ff.path)
+                    times[key].append(float(f.attrs['Time'][()]))
 
-        self.files = np.array(files)
-        self.times = np.array(times)
+        self.files = {k: np.array(v) for k, v in files.items()}
+        self.times = {k: np.array(v) for k, v in times.items()}
 
-        if len(self.files) == 0:
-            raise ValueError(f'No files containing all keys found in {path}')
+        for key in all_keys:
+            if key not in self.files:
+                raise ValueError(f'{key} not found in any files in {path}')
 
-        isort = np.argsort(self.times)
-        self.files = self.files[isort]
-        self.times = self.times[isort]
-        self.times = self.times[::every]
-        self.files = self.files[::every]
+            isort = np.argsort(self.times[key])
+            self.files[key] = self.files[key][isort]
+            self.times[key] = self.times[key][isort]
+            self.times[key] = self.times[key][::every]
+            self.files[key] = self.files[key][::every]
 
-        self.athdfs: list[AthdfFile] = list()
-
+        self.athdfs: dict[str, list[AthdfFile]] = {}
+        self.allocated_athdfs: list[AthdfFile] = []
         self.data = (self.athdfs, self.t_int_order, self.data_keys)
 
     @staticmethod
@@ -199,35 +200,39 @@ class AthdfInterpolator(Interpolator):
         mode: str,
     ) -> np.ndarray:
 
-        files, order, keys  = data
+        file_dict, order, keys  = data
         if mode == 'velocity':
             keys = AthdfInterpolator.vel_keys
 
-        times = np.array([f.time for f in files])
-        i_t = np.searchsorted(times, time, side='right')
+        ret = np.zeros(len(keys))
+        for ik, key in enumerate(keys):
+            files = file_dict[key]
+            times = np.array([f.time for f in files])
+            i_t = np.searchsorted(times, time, side='right')
 
-        if order == 'linear':
-            il = i_t -1
-            ir = i_t + 1
-        elif order == 'cubic':
-            il = i_t - 2
-            ir = i_t + 2
-        else:
-            raise ValueError(f"Time interpolation order {order} not implemented.")
+            if order == 'linear':
+                il = i_t -1
+                ir = i_t + 1
+            elif order == 'cubic':
+                il = i_t - 2
+                ir = i_t + 2
+            else:
+                raise ValueError(f"Time interpolation order {order} not implemented.")
 
-        if ir == len(files)+1:
-            ir -= 1
-            il -= 1
-        if il == -1:
-            il += 1
-            ir += 1
+            if ir == len(files)+1:
+                ir -= 1
+                il -= 1
+            if il == -1:
+                il += 1
+                ir += 1
 
-        res = [f.interpolate(coords, keys=keys) for f in files[il:ir]]
+            res = [f.interpolate(coords, keys=keys) for f in files[il:ir]]
 
-        if order == 'linear':
-            return res[0] + (time - times[il])*(res[1] - res[0])/(times[il+1] - times[il])
-        else:
-            return interp1d(times[il:ir], res, axis=0, kind=order)(time)
+            if order == 'linear':
+                ret[ik] = res[0] + (time - times[il])*(res[1] - res[0])/(times[il+1] - times[il])
+            else:
+                ret[ik] = interp1d(times[il:ir], res, axis=0, kind=order)(time)
+        return ret
 
     @staticmethod
     def interpolate_velocities(
@@ -252,35 +257,47 @@ class AthdfInterpolator(Interpolator):
 
         self.free_shared_memory()
 
-        i_s = self.times.searchsorted(min(t_span), side='right') - 1
-        i_e = self.times.searchsorted(max(t_span), side='right')
+        files_keys = {}
+        for key in self.vel_keys+self.data_keys:
+            i_s = self.times[key].searchsorted(min(t_span), side='right') - 1
+            i_e = self.times[key].searchsorted(max(t_span), side='right')
+            if self.t_int_order == 'cubic':
+                i_s -= 1
+                i_e += 1
+                i_s = max(i_s, 0)
 
-        if self.t_int_order == 'linear':
-            pass
-        elif self.t_int_order == 'cubic':
-            i_s -= 1
-            i_e += 1
-            if i_s < 0:
-                i_s = 0
+            for ff in self.files[key][i_s:i_e]:
+                if ff not in files_keys:
+                    files_keys[ff] = []
+                files_keys[ff].append(key)
 
-        files = self.files[i_s:i_e]
+        def load_file(fk):
+            ff, keys = fk
+            return keys, AthdfFile(ff, keys, self.coordinates)
 
-        def load_file(ff):
-            return AthdfFile(ff, self.vel_keys+self.data_keys, self.coordinates)
-
-        self.athdfs[:] = do_parallel(
+        keys_file = do_parallel(
             load_file,
-            files,
+            files_keys.items(),
             n_cpu=self.n_cpus,
             desc=f"Loading files for t = {t_span[0]} - {t_span[1]}",
             unit="file",
             verbose=self.verbose,
         )
-        self.athdfs.sort(key=lambda f: f.time)
+
+        for keys, athdf in keys_file:
+            self.allocated_athdfs.append(athdf)
+            for key in keys:
+                if key not in self.athdfs:
+                    self.athdfs[key] = []
+                self.athdfs[key].append(athdf)
+        for key in self.athdfs:
+            self.athdfs[key].sort(key=lambda f: f.time)
 
     def free_shared_memory(self):
-        for athdf in self.athdfs:
+        for athdf in self.allocated_athdfs:
             athdf.free_shared_memory()
+        self.allocated_athdfs = []
+        self.athdfs = {}
 
 ################################################################################
 
