@@ -232,6 +232,10 @@ class Tracers:
         if min(*t_span) < tracer.t_start <= max(*t_span):
             tracer.started = True
             t_span = (tracer.t_start, t_span[1])
+        if tracer.dt is not None:
+            first_step = min(abs(t_span[1] - t_span[0]), tracer.dt)
+        else:
+            first_step=None
 
         if (not tracer.started) or tracer.finished:
             return tracer
@@ -240,7 +244,7 @@ class Tracers:
             sol = solve_ivp(
                 interpolator.interpolate_velocities,
                 t_span=t_span,
-                first_step=tracer.dt,
+                first_step=first_step,
                 y0=tracer.pos,
                 args=(interpolator.data,),
                 **kwargs
