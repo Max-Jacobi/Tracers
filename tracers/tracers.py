@@ -2,33 +2,12 @@ from typing import Callable, Any, Iterable, Iterator, Any, Sequence
 from time import time
 from collections.abc import  Mapping
 from abc import ABC, abstractmethod
-from multiprocessing import Pool
-from sys import stdout
 
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
-from tqdm import tqdm
 
-def do_parallel(
-    func: Callable,
-    args: (Sequence | np.ndarray),
-    n_cpu: int,
-    timeout: float = -1.0,
-    verbose: bool = False,
-    **kwargs
-    ):
-    kwargs["total"] = len(args)
-    kwargs["disable"] = not verbose
-    kwargs["ncols"] = 0
-    kwargs["file"] = stdout
-
-    if timeout > 0:
-        func = Timeout(func, timeout)
-    if n_cpu == 1:
-        return list(tqdm(map(func, args), **kwargs))
-    with Pool(n_cpu) as pool:
-        return list(tqdm(pool.imap_unordered(func, args), **kwargs))
+from .utils import do_parallel
 
 class Tracer(Mapping):
     def __init__(
@@ -293,6 +272,8 @@ class Tracers:
         self,
         t_span: tuple[float, float],
     ):
+        if len(self.interpolator.data_keys) == 0:
+            return
         args = [(tracer, self.interpolator, t_span) for tracer in self.tracers]
         self.tracers = do_parallel(
             func=self._interpolate_inner,

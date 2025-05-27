@@ -4,20 +4,21 @@ import numpy as np
 
 from tracers.surface import SurfaceTracers
 from tracers import do_parallel, Tracer
+sys.path.append("/home/ho54hof/repos/Tracers/tracers")
 
 ################################################################################
 
-path = "athena/runs/SFHo_VLR_nps/output-0000"
+path = "/home/ho54hof/athena/runs/SFHo_VLR_nps/output-0000"
 
-rmin = 200
-rmax = 300
-time = 70
+rmin = 300
+rmax = 600
+time = 2000
 
 nr = 10
 nphi = 6
 ntheta = 4
 n_cpu = 4
-n_files = 2 #max(2, n_cpu)
+n_files = 4 #max(2, n_cpu)
 
 ################################################################################
 

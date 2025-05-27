@@ -36,12 +36,12 @@ def _unravel(th: float, ph: float) -> tuple[float, float]:
     ph = ph%_2pi
     return th, ph
 
-def _fill_with_ghosts(buf: np.ndarray, ar: np.ndarray):
-    buf[1:-1, 1:-1] = ar
-    buf[1:-1,  0] = ar[:, -1]
-    buf[1:-1, -1] = ar[:,  0]
-    buf[ 0, 1:-1] = ar[ 0, ::-1]
-    buf[-1, 1:-1] = ar[-1, ::-1]
+def _fill_with_ghosts(buf: np.ndarray, h5f: h5.File, key: str):
+    buf[1:-1, 1:-1] = h5f[key][:]
+    buf[1:-1,  0] = buf[1:-1, -2]
+    buf[1:-1, -1] = buf[1:-1,  1]
+    buf[ 0, 1:-1] = buf[ 1, -2:0:-1]
+    buf[-1, 1:-1] = buf[-2, -2:0:-1]
     buf[ :,  0] = buf[:, -2]
     buf[ :, -1] = buf[:,  1]
 
@@ -84,10 +84,10 @@ class SurfaceFile:
                     continue
                 shm = SharedMemory(create=True, size=mem_size)
                 self.shared_memory[key] = shm.name
+                #print(f'Copying {key} to {shm.name}')
                 data: np.ndarray = np.ndarray(self.shape, dtype=float, buffer=shm.buf)
                 for ir in range(n_r):
-                    ar = np.array(f[f'fields/{ir:02d}/{grp}/{key}'][:])
-                    _fill_with_ghosts(data[ir], ar)
+                    _fill_with_ghosts(data[ir], f, f'fields/{ir:02d}/{grp}/{key}')
 
     def interpolate(self, x: np.ndarray, keys: tuple[str, ...]) -> np.ndarray:
         assert self.grid[0][0] < x[0] and self.grid[0][-1] > x[-1], \
@@ -95,9 +95,14 @@ class SurfaceFile:
 
         res = np.empty(len(keys))
         for ii, key in enumerate(keys):
+            #print(f'Reading {key} from {self.shared_memory[key]}')
             shm = SharedMemory(name=self.shared_memory[key])
             ar: np.ndarray = np.ndarray(self.shape, dtype=float, buffer=shm.buf)
-            res[ii] = SphericalGridInterpolator(self.grid, ar)(x, method='linear')
+            try:
+                res[ii] = SphericalGridInterpolator(self.grid, ar)(x, method='linear')
+            except ValueError:
+                print(f"Error: r_grid:({self.grid[0][0]}-{self.grid[0][-1]}), r={x[0]}")
+                res[ii] = 0
         return res
 
     def free_shared_memory(self):
@@ -131,14 +136,14 @@ class SurfaceInterpolator(Interpolator):
         path: str,
         data_keys: Iterable[str],
         t_int_order: str = 'linear',
-        n_cpus: int = 1,
+        n_cpu: int = 1,
         verbose: bool = False,
         every: int = 1,
     ):
 
         self.path = path
         self.data_keys = tuple(data_keys)
-        self.n_cpus = n_cpus
+        self.n_cpu = n_cpu
         self.verbose = verbose
         implemented = ('linear', 'cubic')
         if t_int_order not in implemented:
@@ -231,6 +236,9 @@ class SurfaceInterpolator(Interpolator):
     ) -> np.ndarray:
         return SurfaceInterpolator.interpolate(time, coords, data, 'data')
 
+    def load_file(self, ff):
+        return SurfaceFile(ff, self.vel_keys+self.data_keys)
+
     def load_data(
         self,
         t_span: tuple[float, float],
@@ -251,13 +259,10 @@ class SurfaceInterpolator(Interpolator):
 
         files = self.files[i_s:i_e]
 
-        def load_file(ff):
-            return SurfaceFile(ff, self.vel_keys+self.data_keys)
-
         self.surfaces[:] = do_parallel(
-            load_file,
+            self.load_file,
             files,
-            n_cpu=self.n_cpus,
+            n_cpu=self.n_cpu,
             desc=f"Loading files for t = {t_span[0]} - {t_span[1]}",
             unit="file",
             verbose=self.verbose,
@@ -293,9 +298,11 @@ class SurfaceTracers(Tracers):
             self.path,
             data_keys=data_keys,
             t_int_order=t_int_order,
-            every=every,
+            n_cpu=n_cpu,
             verbose=verbose,
+            every=every,
         )
+
 
         self.files_per_step = files_per_step
         if t_int_order == 'linear':
