@@ -171,6 +171,7 @@ class Tracers:
         n_cpu: int = 1,
         verbose: bool = False,
         end_conditions: list[Callable[[Tracer], Tracer]] = [],
+        t_eval: None | np.ndarray = None,
         timeout: float = -1.0,
         **kwargs,
     ):
@@ -182,6 +183,7 @@ class Tracers:
         self.verbose = verbose
         self.end_conditions = end_conditions
         self.timeout = timeout
+        self.t_eval = t_eval
         self.kwargs = kwargs
 
         assert all(key in self.seeds.keys() for key in self.coord_keys), \
@@ -204,9 +206,9 @@ class Tracers:
 
     @staticmethod
     def _integrate_inner(
-        args: tuple[Tracer, tuple[float, float], Interpolator, dict]
+        args: tuple[Tracer, tuple[float, float], Interpolator, dict, (None | np.ndarray)]
     ) -> Tracer:
-        tracer, t_span, interpolator, kwargs = args
+        tracer, t_span, interpolator, kwargs, t_eval = args
 
         if min(*t_span) < tracer.t_start <= max(*t_span):
             tracer.started = True
@@ -215,6 +217,9 @@ class Tracers:
             first_step = min(abs(t_span[1] - t_span[0]), tracer.dt)
         else:
             first_step=None
+
+        if t_eval is not None:
+            t_eval = t_eval[(t_eval >= t_span[0]) & (t_eval <= t_span[1])]
 
         if (not tracer.started) or tracer.finished:
             return tracer
@@ -238,7 +243,7 @@ class Tracers:
         t_span: tuple[float, float],
     ) -> None:
 
-        args = [(tracer, t_span, self.interpolator, self.kwargs) for tracer in self.tracers]
+        args = [(tracer, t_span, self.interpolator, self.kwargs, self.t_eval) for tracer in self.tracers]
         self.tracers = do_parallel(
             func=self._integrate_inner,
             args=args,

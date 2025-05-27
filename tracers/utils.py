@@ -12,11 +12,9 @@ def _get_pool(n_cpu):
     """
     global _pool, _n_cpu
     if _pool is None:
-        print(f"Spawning pool with {n_cpu} workers")
+        # print(f"Spawning pool with {n_cpu} workers")
         _pool = Pool(n_cpu)
         _n_cpu = n_cpu
-
-        # Ensure the pool is cleaned up at program exit
         atexit.register(_cleanup_pool)
     elif _n_cpu != n_cpu:
         raise RuntimeError(f"Tried to get pool with {n_cpu} cpus "
@@ -49,5 +47,3 @@ def do_parallel(
         return list(tqdm(map(func, args), **kwargs))
     pool = _get_pool(n_cpu)
     return list(tqdm(pool.imap_unordered(func, args), **kwargs))
-
-
