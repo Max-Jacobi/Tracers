@@ -11,14 +11,16 @@ from scipy.interpolate import RegularGridInterpolator, interp1d
 from . import Tracers, Interpolator, do_parallel
 
 
-def _fill_with_ghosts(buf: np.ndarray, h5f: h5.File, key: str):
+def _fill_with_ghosts(buf: np.ndarray, h5f: h5.File, key: str, ng: int = 1):
     nth, nphi = h5f[key].shape
     half = nphi // 2
-    buf[1:-1, 1:-1] = h5f[key][:]
-    buf[ 0, 1:-1] = np.roll(buf[1, 1:-1], half)
-    buf[-1, 1:-1] = np.roll(buf[-2, 1:-1], half)
-    buf[:,  0] = buf[:, -2]
-    buf[:, -1] = buf[:,  1]
+    buf[ng:-ng, ng:-ng] = h5f[key][:]
+    for ig in range(ng):
+        ign = -ig-1
+        buf[ ig, ng:-ng] = np.roll(buf[ ng+ ig, ng:-ng], half)
+        buf[ign, ng:-ng] = np.roll(buf[-ng+ign, ng:-ng], half)
+        buf[:,  ig] = buf[:, -ng+ign]
+        buf[:, ign] = buf[:,  ng+ig ]
 
 _2pi = 2*np.pi
 
@@ -124,8 +126,14 @@ class SurfaceInterpolator(Interpolator):
         isort = np.argsort(self.times)
         self.files = self.files[isort]
         self.times = self.times[isort]
-        self.times = self.times[::every]
-        self.files = self.files[::every]
+        if every > 1:
+            last_t = self.times[-1]
+            last_f = self.files[-1]
+            self.times = self.times[::every]
+            self.files = self.files[::every]
+            if self.times[-1] != last_t:
+                self.times = np.append(self.times, last_t)
+                self.files = np.append(self.files, last_f)
 
         self.surfaces: list[SurfaceFile] = list()
 
@@ -133,14 +141,20 @@ class SurfaceInterpolator(Interpolator):
 
         self.allocate_shm()
 
-    def allocate_shm(self):
+    def allocate_shm(self, ng: int = 1):
         filename = self.files[0]
         with h5.File(filename, 'r') as f:
             n_r = len(f['coordinates'].keys())
             r = np.array([float(f[f'coordinates/{ir:02d}/R'][:]) for ir in range(n_r)])
             th =  np.array(f['coordinates/00/th'][:])
             ph =  np.array(f['coordinates/00/ph'][:])
-            th = np.concatenate(([-th[0]], th, [th[0]+np.pi]))
+            dth = th[0]*2
+            dph = ph[0]*2
+            th = np.concatenate((
+                -dth*np.arange(ng)-dth/2,
+                th,
+                dth*np.arange(ng)+dth/2+2*np.pi,
+                ))
             ph = np.concatenate(([-ph[0]], ph, [ph[0]+2*np.pi]))
             self.grid = (r, th, ph)
             n_th = len(th)
@@ -150,7 +164,8 @@ class SurfaceInterpolator(Interpolator):
             self.shape = (n_r, n_th, n_ph)
             mem_size = 8*int(np.prod(self.shape))
             keys = np.unique(self.vel_keys+self.data_keys)
-        print(f"Allocating shared memory for {self.files_per_step} files and {len(keys)} grid functions", flush=True)
+        print(f"Allocating shared memory for {self.files_per_step} files and {len(keys)} grid functions "
+              f"using {len(keys)*self.files_per_step*mem_size/1024**3:.2f}GB of memory.", flush=True)
         self.shared_memory =  [{key: SharedMemory(create=True, size=mem_size).name
                                 for key in keys} for _ in range(self.files_per_step)]
 
@@ -295,12 +310,12 @@ class SurfaceTracers(Tracers):
         if reverse:
             self.times = self.interpolator.times[::-1]
             max_t = self.seeds['time'].max()
-            max_t = self.times[self.times > max_t][-1]
+            max_t = self.times[self.times >= max_t][-1]
             self.times = self.times[self.times <= max_t]
         else:
             self.times = self.interpolator.times
             min_time = self.seeds['time'].min()
-            min_time = self.times[self.times < min_time][-1]
+            min_time = self.times[self.times <= min_time][-1]
             self.times = self.times[self.times >= min_time]
 
 

@@ -40,16 +40,21 @@ class Tracer(Mapping):
         for key in data_keys:
             self.trajectory[key] = np.array([])
 
-    def update_trajectory(self, sol: (OdeResult | None)) -> None:
+    def update_trajectory(
+        self,
+        sol: (OdeResult | None),
+        events: list[Callable],
+        t_eval: np.ndarray,
+    ) -> None:
         if sol is None:
             return
 
         if sol.success and len(sol.t) > 0:
             self.pos = sol.y[:, -1]
-            for ii, tv in enumerate(sol.t_events):
-                if len(tv) > 0:
+            for tv, ev in zip(sol.t_events, events):
+                if len(tv) > 0 and hasattr(ev, 'terminal') and ev.terminal:
                     self.finished = True
-                    self.message = f"event {ii} reached"
+                    self.message = f'event "{ev.__name__}" reached'
                     break
         elif not sol.success:
             self.failed = True
@@ -64,16 +69,20 @@ class Tracer(Mapping):
             self.dt = None
             return
 
+        t_eval = t_eval[(t_eval >= min(sol.t)) & (t_eval <= max(sol.t))]
+
         if self.dt > 0:
-            new = sol.t > self.trajectory['time'][-1]
+            new = t_eval > self.trajectory['time'][-1]
         else:
             self.dt *= -1
-            new = sol.t < self.trajectory['time'][-1]
-        self.trajectory['time'] = np.append(self.trajectory['time'], sol.t[new])
+            new = t_eval < self.trajectory['time'][-1]
+        self.trajectory['time'] = np.append(self.trajectory['time'], t_eval[new])
 
+        if sum(new) == 0:
+            return
+        sol_interp = sol.sol(t_eval[new])
         for ix, key in enumerate(self.coord_keys):
-            self.trajectory[key] = np.append(self.trajectory[key], sol.y[ix][new])
-
+            self.trajectory[key] = np.append(self.trajectory[key], sol_interp[ix])
 
     def handle_error(self, error: Exception) -> None:
         self.failed = True
@@ -173,6 +182,7 @@ class Tracers:
         end_conditions: list[Callable[[Tracer], Tracer]] = [],
         t_eval: None | np.ndarray = None,
         timeout: float = -1.0,
+        events: list[Callable] = [],
         **kwargs,
     ):
         self.coord_keys = interpolator.coord_keys
@@ -185,6 +195,7 @@ class Tracers:
         self.timeout = timeout
         self.t_eval = t_eval
         self.kwargs = kwargs
+        self.kwargs['events'] = events
 
         assert all(key in self.seeds.keys() for key in self.coord_keys), \
             f"Seed coordinates do not match Tracers coordinates {self.coord_keys}"
@@ -213,13 +224,11 @@ class Tracers:
         if min(*t_span) < tracer.t_start <= max(*t_span):
             tracer.started = True
             t_span = (tracer.t_start, t_span[1])
+
         if tracer.dt is not None:
             first_step = min(abs(t_span[1] - t_span[0]), tracer.dt)
         else:
             first_step=None
-
-        if t_eval is not None:
-            t_eval = t_eval[(t_eval >= t_span[0]) & (t_eval <= t_span[1])]
 
         if (not tracer.started) or tracer.finished:
             return tracer
@@ -231,9 +240,12 @@ class Tracers:
                 first_step=first_step,
                 y0=tracer.pos,
                 args=(interpolator.data,),
+                dense_output=True,
                 **kwargs
             )
-            tracer.update_trajectory(sol)
+            if t_eval is None:
+                t_eval= sol.t
+            tracer.update_trajectory(sol, events=kwargs['events'], t_eval=t_eval)
         except (InterpolationError, TimeoutError) as er:
             tracer.handle_error(er)
         return tracer
@@ -256,9 +268,9 @@ class Tracers:
 
     @staticmethod
     def _interpolate_inner(
-        args: tuple[Tracer, Interpolator, tuple[float, float]]
+        args: tuple[Tracer, Interpolator],
     ) -> Tracer:
-        tracer, interpolator, t_span = args
+        tracer, interpolator = args
         i_new = len(tracer.trajectory[interpolator.data_keys[0]])
 
         for tt, *pos in zip(*(tracer.trajectory[key][i_new:]
@@ -279,7 +291,7 @@ class Tracers:
     ):
         if len(self.interpolator.data_keys) == 0:
             return
-        args = [(tracer, self.interpolator, t_span) for tracer in self.tracers]
+        args = [(tracer, self.interpolator) for tracer in self.tracers]
         self.tracers = do_parallel(
             func=self._interpolate_inner,
             args=args,
