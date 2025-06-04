@@ -1,5 +1,4 @@
 from typing import Callable, Any, Iterable, Iterator, Any, Sequence
-from time import time
 from collections.abc import  Mapping
 from abc import ABC, abstractmethod
 
@@ -7,7 +6,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
 
-from .utils import do_parallel
+from .utils import do_parallel, TimeoutError
 
 class Tracer(Mapping):
     def __init__(
@@ -44,7 +43,7 @@ class Tracer(Mapping):
         self,
         sol: (OdeResult | None),
         events: list[Callable],
-        t_eval: np.ndarray,
+        t_eval: np.ndarray | None,
     ) -> None:
         if sol is None:
             return
@@ -69,20 +68,35 @@ class Tracer(Mapping):
             self.dt = None
             return
 
-        t_eval = t_eval[(t_eval >= min(sol.t)) & (t_eval <= max(sol.t))]
+        if t_eval is None:
+            if self.dt > 0:
+                new = sol.t > self.trajectory['time'][-1]
+            else:
+                self.dt *= -1
+                new = sol.t < self.trajectory['time'][-1]
 
-        if self.dt > 0:
-            new = t_eval > self.trajectory['time'][-1]
+            if sum(new) == 0:
+                return
+
+            self.trajectory['time'] = np.append(self.trajectory['time'], sol.t[new])
+
+            for ix, key in enumerate(self.coord_keys):
+                self.trajectory[key] = np.append(self.trajectory[key], sol.y[ix])
+        
         else:
-            self.dt *= -1
-            new = t_eval < self.trajectory['time'][-1]
-        self.trajectory['time'] = np.append(self.trajectory['time'], t_eval[new])
+            if self.dt > 0:
+                new = t_eval > self.trajectory['time'][-1]
+            else:
+                self.dt *= -1
+                new = t_eval < self.trajectory['time'][-1]
 
-        if sum(new) == 0:
-            return
-        sol_interp = sol.sol(t_eval[new])
-        for ix, key in enumerate(self.coord_keys):
-            self.trajectory[key] = np.append(self.trajectory[key], sol_interp[ix])
+            if sum(new) == 0:
+                return
+
+            self.trajectory['time'] = np.append(self.trajectory['time'], t_eval[new])
+
+            for ix, key in enumerate(self.coord_keys):
+                self.trajectory[key] = np.append(self.trajectory[key], sol.sol(t_eval[new])[ix])
 
     def handle_error(self, error: Exception) -> None:
         self.failed = True
@@ -98,7 +112,6 @@ class Tracer(Mapping):
         header = f"{props}\nmessage: {self.message}\n{legend}"
 
         filename = f"{filebase}{self.id:06d}.dat"
-
 
         tsort = np.argsort(self.trajectory['time'])
 
@@ -347,20 +360,3 @@ class Tracers:
 class InterpolationError(Exception):
     pass
 
-class TimeoutError(Exception):
-    pass
-
-class Timeout:
-    t_start: (None | float)
-
-    def __init__(self, func: Callable, timeout: float):
-        self.func = func
-        self.timeout = timeout
-        self.t_start = None
-
-    def __call__(self, *args, **kwargs):
-        if self.t_start is None:
-            self.t_start = time()
-        if (t := time() - self.t_start) > self.timeout:
-            raise TimeoutError(f"Tracer timed out after {t:.1f}s")
-        return self.func(*args, **kwargs)

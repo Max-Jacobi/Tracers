@@ -1,7 +1,6 @@
 from typing import Iterable
 from multiprocessing.shared_memory import SharedMemory
-from multiprocessing import Pool
-import os
+import os, signal, sys
 
 import numpy as np
 import h5py as h5
@@ -9,18 +8,24 @@ from numba import njit
 from scipy.interpolate import RegularGridInterpolator, interp1d
 
 from . import Tracers, Interpolator, do_parallel
+from .utils import cleanup_pool
 
 
-def _fill_with_ghosts(buf: np.ndarray, h5f: h5.File, key: str, ng: int = 1):
+def _fill_with_ghosts(buf: np.ndarray, h5f: h5.File, key: str, ng: int = 1, ev: np.ndarray = np.ones(3, dtype=int)):
     nth, nphi = h5f[key].shape
     half = nphi // 2
-    buf[ng:-ng, ng:-ng] = h5f[key][:]
+    ar = h5f[key][:]
+    buf[ng:-ng, ng:-ng] = ar[::ev[1], ::ev[2]]
     for ig in range(ng):
         ign = -ig-1
-        buf[ ig, ng:-ng] = np.roll(buf[ ng+ ig, ng:-ng], half)
-        buf[ign, ng:-ng] = np.roll(buf[-ng+ign, ng:-ng], half)
-        buf[:,  ig] = buf[:, -ng+ign]
-        buf[:, ign] = buf[:,  ng+ig ]
+        buf[ ig, ng:-ng] = np.roll(ar[ ig, ::ev[2]], half)
+        buf[ign, ng:-ng] = np.roll(ar[ign, ::ev[2]], half)
+        buf[ng:-ng,  ig] = ar[::ev[1], ign]
+        buf[ng:-ng, ign] = ar[::ev[1],  ig]
+        buf[ig, ig] = ar[ig, ig]
+        buf[ign, ig] = ar[ign, ig]
+        buf[ig, ign] = ar[ig, ign]
+        buf[ign, ign] = ar[ign, ign]
 
 _2pi = 2*np.pi
 
@@ -39,6 +44,7 @@ class SurfaceFile:
         shm_names: dict[str, str],
         grid: tuple[np.ndarray, np.ndarray, np.ndarray],
         shape: tuple[int, int, int],
+        every: np.ndarray = np.ones(3, dtype=int),
     ):
         self.filename = filename
         self.keys = tuple(shm_names.keys())
@@ -54,7 +60,7 @@ class SurfaceFile:
                 grp = key.split('.')[0]
                 data: np.ndarray = np.ndarray(self.shape, dtype=float, buffer=shm.buf)
                 for ir in range(self.shape[0]):
-                    _fill_with_ghosts(data[ir], f, f'fields/{ir:02d}/{grp}/{key}')
+                    _fill_with_ghosts(data[ir], f, f'fields/{ir*every[0]:02d}/{grp}/{key}', ev=every)
 
     def interpolate(self, x: np.ndarray, keys: tuple[str, ...]) -> np.ndarray:
         r = np.sqrt(np.sum(x*x))
@@ -90,27 +96,29 @@ class SurfaceInterpolator(Interpolator):
         data_keys: Iterable[str],
         t_int_order: str = 'linear',
         n_cpu: int = 1,
-        files_per_step: int = 2,
+        files_per_step: int | None = None,
+        avail_memory: float | None = None,
         verbose: bool = False,
         every: int = 1,
+        every_grid: np.ndarray = np.ones(3, dtype=int),
     ):
 
         self.path = path
         self.data_keys = tuple(data_keys)
         self.n_cpu = n_cpu
-        self.files_per_step = files_per_step
         self.verbose = verbose
         implemented = ('linear', 'cubic')
         if t_int_order not in implemented:
             raise ValueError(f"Time interpolation order {t_int_order} not implemented.")
         self.t_int_order = t_int_order
+        self.every_grid = every_grid
 
 
         files: list[str] = []
         times: list[float] = []
 
         for ff in os.scandir(path):
-            if not (ff.is_file() and 'surface' in ff.name):
+            if not 'surface' in ff.name:
                 continue
 
             with h5.File(ff.path, 'r') as f:
@@ -139,38 +147,62 @@ class SurfaceInterpolator(Interpolator):
 
         self.data = (self.surfaces, self.t_int_order, self.data_keys)
 
-        self.allocate_shm()
+        # Ensure shared mempry cleanup on SIGTERM
+        def handler(signum, frame):
+            os.write(2, b"SIGTERM received\n")
+            os.write(2, b" Cleaning up shared memory\n")
+            self.interpolator.free_shared_memory()
+            os.write(2, b" Cleaning up worker pool\n")
+            cleanup_pool()
+            os.write(2, b" Done\n")
+            os._exit(1)
 
-    def allocate_shm(self, ng: int = 1):
+        signal.signal(signal.SIGTERM, handler)
+
+        self.allocate_shm(files_per_step, avail_memory)
+
+    def allocate_shm(self, files_per_step: int|None, req_mem: float|None):
+        ev = self.every_grid
         filename = self.files[0]
         with h5.File(filename, 'r') as f:
             n_r = len(f['coordinates'].keys())
             r = np.array([float(f[f'coordinates/{ir:02d}/R'][:]) for ir in range(n_r)])
             th =  np.array(f['coordinates/00/th'][:])
             ph =  np.array(f['coordinates/00/ph'][:])
-            dth = th[0]*2
-            dph = ph[0]*2
-            th = np.concatenate((
-                -dth*np.arange(ng)-dth/2,
-                th,
-                dth*np.arange(ng)+dth/2+2*np.pi,
-                ))
-            ph = np.concatenate(([-ph[0]], ph, [ph[0]+2*np.pi]))
-            self.grid = (r, th, ph)
-            n_th = len(th)
-            n_ph = len(ph)
-            if n_ph%2 != 0:
+            if len(ph)%2 != 0:
                 raise ValueError(f"Files have unqual number of points in phi direction (n_phi={n_ph})!")
-            self.shape = (n_r, n_th, n_ph)
+            r = r[::ev[0]]
+            th = np.concatenate(([-th[0]], th[::ev[1]], [th[0]+2*np.pi]))
+            ph = np.concatenate(([-ph[0]], ph[::ev[2]], [ph[0]+2*np.pi]))
+            self.grid = (r, th, ph)
+            self.shape = (len(r), len(th), len(ph))
             mem_size = 8*int(np.prod(self.shape))
             keys = np.unique(self.vel_keys+self.data_keys)
+
+        st = os.statvfs("/dev/shm")
+        free_mem = st.f_bavail * st.f_frsize
+
+        if files_per_step is not None:
+            ...
+        elif req_mem is not None:
+            req_mem = req_mem*1024**2
+            files_per_step = int(req_mem/len(keys)/mem_size)
+        else:
+            raise RuntimeError("Must either supply avail_memory or files_per_step argument")
+        self.req_mem = len(keys)*files_per_step*mem_size
+        self.files_per_step = files_per_step
+
         print(f"Allocating shared memory for {self.files_per_step} files and {len(keys)} grid functions "
-              f"using {len(keys)*self.files_per_step*mem_size/1024**3:.2f}GB of memory.", flush=True)
+              f"using {self.req_mem/1024**3:.2f}GB of memory.", flush=True)
+        if free_mem < 1.2*req_mem:
+            raise RuntimeError(f"This configuration would request to much memory. Free: {free_mem/1024**3}GB")
+
+
         self.shared_memory =  [{key: SharedMemory(create=True, size=mem_size).name
                                 for key in keys} for _ in range(self.files_per_step)]
 
     def load_file(self, args: tuple[str, dict[str, str]]):
-        return SurfaceFile(*args, self.grid, self.shape)
+        return SurfaceFile(*args, grid=self.grid, shape=self.shape, every=self.every_grid)
 
     def load_data(
         self,
@@ -260,7 +292,7 @@ class SurfaceInterpolator(Interpolator):
                     shm.close()
                     shm.unlink()
                 except FileNotFoundError:
-                    # print(f"Could not find shared memory for {key}")
+                    print(f"Could not find shared memory for {key}: {name}")
                     ...
         self.shared_memory = []
 
@@ -274,15 +306,19 @@ class SurfaceTracers(Tracers):
         data_keys: Iterable[str],
         n_cpu: int = 1,
         reverse: bool = True,
-        files_per_step: int = 2,
+        files_per_step: int | None = None,
+        avail_memory: float | None = None,
         t_int_order: str = 'linear',
         every: int = 1,
+        every_grid: int | np.ndarray = np.ones(3, dtype=int),
         verbose: bool = False,
         **kwargs,
     ):
 
         self.path = path
         self.data_keys = tuple(data_keys)
+        if isinstance(every_grid, int):
+            every_grid = np.ones(3, int)*every_grid
         interpolator = SurfaceInterpolator(
             self.path,
             data_keys=data_keys,
@@ -290,14 +326,16 @@ class SurfaceTracers(Tracers):
             n_cpu=n_cpu,
             verbose=verbose,
             files_per_step = files_per_step,
+            avail_memory = avail_memory,
             every=every,
+            every_grid=every_grid,
         )
 
-        self.files_per_step = files_per_step
+        self.files_per_step = interpolator.files_per_step
         if t_int_order == 'linear':
-            self.step = files_per_step - 1
+            self.step = self.files_per_step - 1
         elif t_int_order == 'cubic':
-            self.step = files_per_step - 2
+            self.step = self.files_per_step - 2
         else:
             raise ValueError(f"Time interpolation order {t_int_order} not implemented.")
 
@@ -331,6 +369,7 @@ class SurfaceTracers(Tracers):
                 if all(tr.finished for tr in self.tracers):
                     break
         finally:
+            print("Cleaning up", flush=True)
             self.interpolator.free_shared_memory()
 
     def __del__(self):
