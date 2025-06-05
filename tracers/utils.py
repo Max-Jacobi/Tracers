@@ -1,8 +1,8 @@
-from typing import Callable
-from time import time
 from multiprocessing import Pool
 from sys import stdout
 from tqdm import tqdm
+import functools
+import concurrent.futures
 import atexit
 
 _pool = None
@@ -30,29 +30,33 @@ def cleanup_pool():
         _pool.join()
         _pool = None
 
+
 class TimeoutError(Exception):
     pass
 
-class Timeout:
-    t_start: (None | float)
-
-    def __init__(self, func: Callable, timeout: float):
-        self.func = func
-        self.timeout = timeout
-        self.t_start = None
-
-    def __call__(self, *args, **kwargs):
-        if self.t_start is None:
-            self.t_start = time()
-        if (t := time() - self.t_start) > self.timeout:
-            raise TimeoutError(f"Tracer timed out after {t:.1f}s")
-        return self.func(*args, **kwargs)
+def timeout(seconds=10., error_message="Function call timed out"):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if not seconds > 0:
+                return func(*args, **kwargs)
+            # Use a ThreadPoolExecutor with max_workers=1
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(func, *args, **kwargs)
+                try:
+                    # Wait up to 'seconds' for completion
+                    return future.result(timeout=seconds)
+                except concurrent.futures.TimeoutError:
+                    # Cancel the future (best‐effort)
+                    future.cancel()
+                    raise TimeoutError(error_message)
+        return wrapper
+    return decorator
 
 def do_parallel(
     func,
     args,
     n_cpu,
-    timeout: float = -1.0,
     verbose: bool = False,
     **kwargs
 ):
@@ -61,8 +65,6 @@ def do_parallel(
     kwargs["ncols"]   = 0
     kwargs["file"]    = stdout
 
-    if timeout > 0:
-        func = Timeout(func, timeout)
     if n_cpu == 1:
         return list(tqdm(map(func, args), **kwargs))
     pool = _get_pool(n_cpu)

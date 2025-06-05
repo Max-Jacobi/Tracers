@@ -1,16 +1,13 @@
 ################################################################################
-from multiprocessing import shared_memory
-from typing import Iterable
 from multiprocessing.shared_memory import SharedMemory
-from multiprocessing import Pool
 import os
 
 import numpy as np
 import h5py as h5
-from numba import njit
-from scipy.interpolate import RegularGridInterpolator, interp1d
+from scipy.interpolate import RegularGridInterpolator
 
-from . import Tracers, Interpolator, do_parallel
+from .from_file import File, FileInterpolator, FileTracers
+from .utils import do_parallel
 
 ################################################################################
 
@@ -25,18 +22,18 @@ def _rotjac(theta, phi):
         [-sp, ct*cp, st*cp],
     ])
 
-class AthdfFile:
+class AthdfFile(File):
     def __init__(
         self,
         filename: str,
         shm_names: dict[str, str],
+        coord_keys: tuple[str],
         bitant: bool = False,
         spherical: bool = False,
     ):
 
         self.filename = filename
         self.shared_memory = shm_names
-        self.keys = tuple(self.shared_memory.keys())
         self.bitant = bitant
         self.spherical = spherical
 
@@ -52,40 +49,27 @@ class AthdfFile:
             self.full_shape = (nmb, *mb_size)
             self.shape = tuple(mb_size)
 
-            self.x1 = np.array(f['x1v'][:])
-            self.x2 = np.array(f['x2v'][:])
-            self.x3 = np.array(f['x3v'][:])
-            o1 = self.x1[:, 1]
-            o2 = self.x2[:, 1]
-            o3 = self.x3[:, 1]
-            e1 = self.x1[:, -2]
-            e2 = self.x2[:, -2]
-            e3 = self.x3[:, -2]
+            self.grid = np.array([f[f'{key}v'][:] for key in coord_keys]).T
+            self.origins = np.array([x[1] for x in self.grid])
+            self.ends = np.array([x[-2] for x in self.grid])
 
-            self.origins = np.array([o3, o2, o1])
-            self.ends = np.array([e3, e2, e1])
-
-
-            for key in self.keys:
-                if key in self.shared_memory:
-                    continue
-                shm = SharedMemory(name=self.shared_memory[key])
+            for key, shm_name in self.shared_memory.items():
+                shm = SharedMemory(name=shm_name)
                 data: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
                 j = vars_in_file.index(key)
                 data[:] = f[dset][j]
 
-    def get_mb_data(
+    def get_mb_index(
         self,
         x: np.ndarray
         ) -> int:
         """
-        Get the mesh block data for a given point.
-        Returns index of meshblock
+        Returns index of meshblock that contains x
         """
         mask = np.all(
-                (x[:, None] >= self.origins) &
-                (x[:, None] <= self.ends),
-                axis=0)
+                (x >= self.origins) &
+                (x <= self.ends),
+                axis=1)
         if sum(mask) == 0:
             return -1
         idx = np.where(mask)[0][0]
@@ -101,17 +85,12 @@ class AthdfFile:
             if phi < 0: phi = phi + np.pi*2
             x = np.array([phi, theta, r])
 
-        imb = self.get_mb_data(x)
+        imb = self.get_mb_index(x)
         if imb == -1:
+            # out of bounds
             return np.zeros_like(x)
 
         xx = (self.x3[imb], self.x2[imb], self.x1[imb])
-        assert self.x3[imb][0] < x[0] < self.x3[imb][-1], \
-          f"z({x[0]}) out of bounds({self.x3[imb][0]}:{self.x3[imb][-1]})"
-        assert self.x2[imb][0] < x[1] < self.x2[imb][-1], \
-          f"z({x[1]}) out of bounds({self.x2[imb][0]}:{self.x2[imb][-1]})"
-        assert self.x1[imb][0] < x[2] < self.x1[imb][-1], \
-          f"z({x[2]}) out of bounds({self.x1[imb][0]}:{self.x1[imb][-1]})"
 
         res = np.empty(len(keys))
         for ii, key in enumerate(keys):
@@ -119,71 +98,59 @@ class AthdfFile:
             ar: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
             res[ii] = RegularGridInterpolator(xx, ar[imb])(x, method='linear')
 
-        if self.spherical:
+        if self.spherical and keys==AthdfInterpolator.vel_keys:
             jac = _rotjac(theta, phi)
             res = jac @ res
         if mirror_z:
             res[0] = -res[0]
         return res
 
-    def __repr__(self):
-        return f"AthdfFile({self.filename})"
-
-    def __str__(self):
-        return self.filename
-
-class AthdfInterpolator(Interpolator):
+class AthdfInterpolator(FileInterpolator):
     coord_keys = ('x3', 'x2', 'x1')
     vel_keys = ('vel3', 'vel2', 'vel1')
+    file_class = AthdfFile
 
-    def parse_files(self, path: str, every: int = 1) -> tuple[np.ndarray, np.ndarray, int]:
+    def __init__(self, *args, bitant: bool = False, spherical: bool = False, **kwargs):
+        self.file_args = dict(bitant=bitant, spherical=spherical)
+        super().__init__(*args, **kwargs)
+
+    def parse_files(self, path: str) -> tuple[np.ndarray, np.ndarray, int]:
         '''
         returns an array of filnames and an array of the corresponding times
         and the maximum memory size in bytes that one gridfunction needs
         '''
 
-        _files: list[str] = []
-        _times: list[float] = []
+        files: list[str] = []
+        times: list[float] = []
 
         mem_size = 0
-        for ff in os.scandir(path):
-            if not (ff.is_file() and ff.name.endswith('.athdf')):
-                continue
 
-            with h5.File(ff.path, 'r') as f:
+        fnames = [ff.path for ff in os.scandir(path) if ff.name.endswith('.athdf')]
+        def read_time(fpath):
+            nonlocal mem_size
+            with h5.File(fpath, 'r') as f:
                 if not all(key in f.attrs['VariableNames'][:].astype(str)
                            for key in self.vel_keys+self.data_keys):
-                    continue
-                _files.append(ff.path)
-                _times.append(float(f.attrs['Time'][()]))
+                    return
+                files.append(fpath)
+                times.append(float(f.attrs['Time'][()]))
                 nmb: int = int(f.attrs["NumMeshBlocks"])
                 mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
                 mem_size = max(mem_size, 8*nmb*int(np.prod(mb_size)))
 
-        files = np.array(_files)
-        times = np.array(_times)
+        do_parallel(
+            read_time, fnames,
+            n_cpu=1,
+            desc="Parsing file times",
+            unit="files",
+            verbose=self.verbose,
+            )
 
-        isort = np.argsort(times)
-        files = files[isort]
-        times = times[isort]
-        if every > 1:
-            last_t =times[-1]
-            last_f =files[-1]
-            times =times[::every]
-            files =files[::every]
-            if times[-1] != last_t:
-               times = np.append(_times, last_t)
-               files = np.append(_files, last_f)
+        return np.array(files), np.array(times), mem_size
 
-        return files,times, mem_size
-
-    def __init__(self, bitant: bool = False, spherical: bool = False, *args, **kwargs):
-        self.bitant = bitant
-        self.spherical = spherical
-        super.__init__(*args, **kwargs)
-
-    def load_file(self, args: tuple[str, dict[str, str]]) -> AthdfFile:
-        return AthdfFile(*args, bitant=self.bitant, spherical=self.spherical)
-
-class AthdfTracers(Tracers):
+class AthdfTracers(FileTracers):
     interpolator_class = AthdfInterpolator
+
+    def __init__(self, *args, bitant: bool = False, spherical: bool = False, **kwargs):
+        self.interp_kwargs = dict(bitant=bitant, spherical=spherical)
+        super().__init__(*args, **kwargs)

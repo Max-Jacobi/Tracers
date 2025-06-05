@@ -7,6 +7,7 @@ from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
 
 from .utils import do_parallel, TimeoutError
+from .utils import timeout as to
 
 class Tracer(Mapping):
     def __init__(
@@ -82,7 +83,6 @@ class Tracer(Mapping):
 
             for ix, key in enumerate(self.coord_keys):
                 self.trajectory[key] = np.append(self.trajectory[key], sol.y[ix])
-        
         else:
             if self.dt > 0:
                 new = t_eval > self.trajectory['time'][-1]
@@ -230,9 +230,16 @@ class Tracers:
 
     @staticmethod
     def _integrate_inner(
-        args: tuple[Tracer, tuple[float, float], Interpolator, dict, (None | np.ndarray)]
+        args: tuple[
+            Tracer,
+            tuple[float, float],
+            Interpolator,
+            dict,
+            (None | np.ndarray),
+            float,
+        ]
     ) -> Tracer:
-        tracer, t_span, interpolator, kwargs, t_eval = args
+        tracer, t_span, interpolator, kwargs, t_eval, timeout = args
 
         if min(*t_span) < tracer.t_start <= max(*t_span):
             tracer.started = True
@@ -247,7 +254,7 @@ class Tracers:
             return tracer
 
         try:
-            sol = solve_ivp(
+            sol = to(timeout)(solve_ivp)(
                 interpolator.interpolate_velocities,
                 t_span=t_span,
                 first_step=first_step,
@@ -268,7 +275,7 @@ class Tracers:
         t_span: tuple[float, float],
     ) -> None:
 
-        args = [(tracer, t_span, self.interpolator, self.kwargs, self.t_eval) for tracer in self.tracers]
+        args = [(tracer, t_span, self.interpolator, self.kwargs, self.t_eval, self.timeout) for tracer in self.tracers]
         self.tracers = do_parallel(
             func=self._integrate_inner,
             args=args,
@@ -276,20 +283,19 @@ class Tracers:
             unit='tracer',
             n_cpu=self.n_cpu,
             verbose=self.verbose,
-            timeout=self.timeout,
         )
 
     @staticmethod
     def _interpolate_inner(
-        args: tuple[Tracer, Interpolator],
+        args: tuple[Tracer, Interpolator, float],
     ) -> Tracer:
-        tracer, interpolator = args
+        tracer, interpolator, timeout = args
         i_new = len(tracer.trajectory[interpolator.data_keys[0]])
 
         for tt, *pos in zip(*(tracer.trajectory[key][i_new:]
                               for key in ("time", *interpolator.coord_keys))):
             try:
-                data = interpolator.interpolate_data(tt, np.array(pos), interpolator.data)
+                data = to(timeout)(interpolator.interpolate_data)(tt, np.array(pos), interpolator.data)
                 for key, value in zip(interpolator.data_keys, data):
                     tracer.trajectory[key] = np.append(tracer.trajectory[key], value)
             except (InterpolationError, TimeoutError) as er:
@@ -304,7 +310,7 @@ class Tracers:
     ):
         if len(self.interpolator.data_keys) == 0:
             return
-        args = [(tracer, self.interpolator) for tracer in self.tracers]
+        args = [(tracer, self.interpolator, self.timeout) for tracer in self.tracers]
         self.tracers = do_parallel(
             func=self._interpolate_inner,
             args=args,
@@ -312,7 +318,6 @@ class Tracers:
             unit='tracer',
             n_cpu=self.n_cpu,
             verbose=self.verbose,
-            timeout=self.timeout,
         )
 
 
@@ -325,7 +330,6 @@ class Tracers:
                 unit='tracer',
                 n_cpu=self.n_cpu,
                 verbose=self.verbose,
-                timeout=self.timeout,
             )
 
         if self.verbose:
@@ -359,4 +363,3 @@ class Tracers:
 
 class InterpolationError(Exception):
     pass
-

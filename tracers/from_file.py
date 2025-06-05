@@ -8,10 +8,10 @@ import h5py as h5
 from scipy.interpolate import interp1d
 
 from . import Tracers, Interpolator, do_parallel
-from .utils import cleanup_pool
 
 class File(ABC):
     time: float
+    filename: str
 
     @abstractmethod
     def __init__(
@@ -32,11 +32,19 @@ class File(ABC):
         '''
         ...
 
+    def __repr__(self):
+        return f"<{type(self)} {self.filename}>"
+
+    def __str__(self):
+        return self.filename
+
+
 
 class FileInterpolator(Interpolator, ABC):
     coord_keys: tuple[str, ...]
     vel_keys: tuple[str, ...]
     data: tuple
+    file_class: type
 
     def __init__(
         self,
@@ -63,7 +71,19 @@ class FileInterpolator(Interpolator, ABC):
             every_grid = np.ones(self.dim, int)*every_grid
         self.every_grid = every_grid
 
-        self.filenames, self.times, self.max_size = self.parse_files(path, every=every_time)
+        self.filenames, self.times, self.max_size = self.parse_files(path)
+
+        isort = np.argsort(self.times)
+        self.filenames = self.filenames[isort]
+        self.times = self.times[isort]
+        if every_time > 1:
+            last_t = self.times[-1]
+            last_f = self.filenames[-1]
+            self.times = self.times[::every_time]
+            self.filenames = self.filenames[::every_time]
+            if self.times[-1] != last_t:
+               self.times = np.append(self.times, last_t)
+               self.filenames = np.append(self.filenames, last_f)
 
         self.files: list[File] = list()
         self.data = (self.files, self.t_int_order, self.data_keys, self.vel_keys)
@@ -71,7 +91,7 @@ class FileInterpolator(Interpolator, ABC):
         self.allocate_shm(files_per_step, use_shared_memory)
 
     @abstractmethod
-    def parse_files(self, path: str, every: int = 1) -> tuple[np.ndarray, np.ndarray, int]:
+    def parse_files(self, path: str) -> tuple[np.ndarray, np.ndarray, int]:
         '''
         returns an array of filnames and an array of the corresponding times
         and the maximum memory size in bytes that one gridfunction needs
@@ -115,9 +135,8 @@ class FileInterpolator(Interpolator, ABC):
         self.shared_memory =  [{key: SharedMemory(create=True, size=self.max_size).name
                                 for key in keys} for _ in range(self.files_per_step)]
 
-    @abstractmethod
     def load_file(self, args: tuple[str, dict[str, str]]) -> File:
-        ...
+        return self.file_class(*args, **self.file_args)
 
     def load_data(
         self,
@@ -141,7 +160,7 @@ class FileInterpolator(Interpolator, ABC):
             list(zip(files, self.shared_memory)),
             n_cpu=self.n_cpu,
             desc=f"Loading files for t = {t_span[0]} - {t_span[1]}",
-            unit="file",
+            unit="files",
             verbose=self.verbose,
         )
         self.files.sort(key=lambda f: f.time)
@@ -190,7 +209,7 @@ class FileInterpolator(Interpolator, ABC):
         time: float,
         coords: np.ndarray,
         data: tuple,
-    ) -> np.ndarray:
+        ) -> np.ndarray:
         return FileInterpolator.interpolate(time, coords, data, 'velocity')
 
     @staticmethod
@@ -216,6 +235,7 @@ class FileInterpolator(Interpolator, ABC):
 class FileTracers(Tracers, ABC):
     interpolator_class: type
     interpolator: FileInterpolator
+    interp_kwargs: dict = {}
 
     def __init__(
         self,
@@ -244,6 +264,7 @@ class FileTracers(Tracers, ABC):
             use_shared_memory = use_shared_memory,
             every_time=every_time,
             every_grid=every_grid,
+            **self.interp_kwargs
         )
 
         self.files_per_step = interpolator.files_per_step
@@ -260,6 +281,7 @@ class FileTracers(Tracers, ABC):
             verbose=verbose,
             **kwargs,
         )
+
         if reverse:
             self.times = self.interpolator.times[::-1]
             max_t = self.seeds['time'].max()
