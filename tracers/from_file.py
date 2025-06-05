@@ -194,7 +194,8 @@ class FileInterpolator(Interpolator, ABC):
         coords: np.ndarray,
         data: tuple,
     ) -> np.ndarray:
-        ...
+        vel =  FileInterpolator.interpolate(time, coords, data, 'velocity')
+        return vel
 
     @staticmethod
     def interpolate_data(
@@ -202,7 +203,7 @@ class FileInterpolator(Interpolator, ABC):
         coords: np.ndarray,
         data: tuple,
     ) -> np.ndarray:
-        ...
+        return FileInterpolator.interpolate(time, coords, data, 'data')
 
     def free_shared_memory(self):
         for file_shm in self.shared_memory:
