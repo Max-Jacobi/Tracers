@@ -83,12 +83,6 @@ class SurfaceInterpolator(FileInterpolator):
     vel_keys = ("tracer.hydro.aux.V_u_x",
                 "tracer.hydro.aux.V_u_y",
                 "tracer.hydro.aux.V_u_z")
-    file_class = SurfaceFile
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.grid = self.load_grid(self.filenames[0], every=self.every_grid)
-        self.shape = tuple(len(g) for g in self.grid)
 
     def parse_files(self, path: str, every: int = 1) -> tuple[np.ndarray, np.ndarray, int]:
         _files = []
@@ -111,6 +105,9 @@ class SurfaceInterpolator(FileInterpolator):
         files = np.array(_files)
         times = np.array(_times)
 
+        self.grid = self.load_grid(files[0], every=self.every_grid)
+        self.shape = tuple(len(g) for g in self.grid)
+
         if len(files) == 0:
             raise ValueError(f'No files found in {path}')
 
@@ -125,7 +122,7 @@ class SurfaceInterpolator(FileInterpolator):
             if times[-1] != last_t:
                 times = np.append(times, last_t)
                 files = np.append(files, last_f)
-        return files, times, int(np.prod(self.shape))
+        return files, times, int(np.prod(self.shape))*8
 
     def load_grid(self, filename, every: np.ndarray | None) -> tuple[np.ndarray, ...]:
         """
@@ -145,8 +142,8 @@ class SurfaceInterpolator(FileInterpolator):
             ph = np.concatenate(([-ph[0]], ph[::every[2]], [ph[0]+2*np.pi]))
         return (r, th, ph)
 
-    def load_file(self, args: tuple[str, dict[str, str]]) -> File:
-        return self.file_class(*args, grid=self.grid, every=self.every_grid)
+    def load_file(self, args: tuple[str, dict[str, str]]) -> SurfaceFile:
+        return SurfaceFile(*args, grid=self.grid, every=self.every_grid)
 
 class SurfaceTracers(FileTracers):
     interpolator_class = SurfaceInterpolator

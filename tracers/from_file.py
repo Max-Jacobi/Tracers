@@ -37,7 +37,6 @@ class FileInterpolator(Interpolator, ABC):
     coord_keys: tuple[str, ...]
     vel_keys: tuple[str, ...]
     data: tuple
-    file_class: type
 
     def __init__(
         self,
@@ -64,8 +63,7 @@ class FileInterpolator(Interpolator, ABC):
             every_grid = np.ones(self.dim, int)*every_grid
         self.every_grid = every_grid
 
-        self.filenames, self.times = self.parse_files(path, every=every_time)
-        self.max_size = 8*int(max(np.prod(sh) for sh in self.shapes))
+        self.filenames, self.times, self.max_size = self.parse_files(path, every=every_time)
 
         self.files: list[File] = list()
         self.data = (self.files, self.t_int_order, self.data_keys, self.vel_keys)
@@ -91,9 +89,7 @@ class FileInterpolator(Interpolator, ABC):
         st = os.statvfs("/dev/shm")
         free_mem = st.f_bavail * st.f_frsize
 
-        if files_per_step is not None:
-            ...
-        elif req_mem is not None:
+        if files_per_step is None and req_mem is not None:
             req_mem = req_mem*1024**2
             files_per_step = int(req_mem/len(keys)/self.max_size)
         else:
@@ -103,7 +99,7 @@ class FileInterpolator(Interpolator, ABC):
 
         print(f"Allocating shared memory for {self.files_per_step} files and {len(keys)} grid functions "
               f"using {self.req_mem/1024**self.dim:.2f}GB of memory.", flush=True)
-        if free_mem < 1.2*req_mem:
+        if free_mem < 1.2*self.req_mem:
             raise RuntimeError(f"This configuration would request to much memory. Free: {free_mem/1024**self.dim}GB")
 
         # Ensure shared mempry cleanup on SIGTERM
@@ -184,9 +180,10 @@ class FileInterpolator(Interpolator, ABC):
         res = [f.interpolate(coords, keys=keys) for f in files[il:ir]]
 
         if order == 'linear':
-            return res[0] + (time - times[il])*(res[1] - res[0])/(times[il+1] - times[il])
+            ret = res[0] + (time - times[il])*(res[1] - res[0])/(times[il+1] - times[il])
         else:
-            return interp1d(times[il:ir], res, axis=0, kind=order)(time)
+            ret = interp1d(times[il:ir], res, axis=0, kind=order)(time)
+        return ret
 
     @staticmethod
     def interpolate_velocities(
@@ -194,8 +191,7 @@ class FileInterpolator(Interpolator, ABC):
         coords: np.ndarray,
         data: tuple,
     ) -> np.ndarray:
-        vel =  FileInterpolator.interpolate(time, coords, data, 'velocity')
-        return vel
+        return FileInterpolator.interpolate(time, coords, data, 'velocity')
 
     @staticmethod
     def interpolate_data(

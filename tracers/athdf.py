@@ -1,4 +1,5 @@
 ################################################################################
+from multiprocessing import shared_memory
 from typing import Iterable
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing import Pool
@@ -13,18 +14,31 @@ from . import Tracers, Interpolator, do_parallel
 
 ################################################################################
 
+def _rotjac(theta, phi):
+    st = np.sin(theta)
+    ct = np.cos(theta)
+    sp = np.sin(phi)
+    cp = np.cos(phi)
+    return np.array([
+        [0, -st, ct],
+        [cp, ct*sp, st*sp],
+        [-sp, ct*cp, st*cp],
+    ])
+
 class AthdfFile:
     def __init__(
         self,
         filename: str,
-        keys: Iterable[str],
-        coordinates: str = "",
+        shm_names: dict[str, str],
+        bitant: bool = False,
+        spherical: bool = False,
     ):
 
         self.filename = filename
-        self.keys = tuple(keys)
-        self.coordinates = coordinates
-        self.shared_memory = {}
+        self.shared_memory = shm_names
+        self.keys = tuple(self.shared_memory.keys())
+        self.bitant = bitant
+        self.spherical = spherical
 
         with h5.File(filename, 'r') as f:
             self.time = float(f.attrs['Time'][()])
@@ -32,7 +46,6 @@ class AthdfFile:
             vars_in_file = list(f.attrs['VariableNames'][:].astype(str))
             nmb: int = int(f.attrs["NumMeshBlocks"])
             mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
-            mem_size = 8*nmb*int(np.prod(mb_size))
 
             # assume all grid functions are in the first dataset
             dset = f.attrs['DatasetNames'][0].decode('utf-8')
@@ -56,8 +69,7 @@ class AthdfFile:
             for key in self.keys:
                 if key in self.shared_memory:
                     continue
-                shm = SharedMemory(create=True, size=mem_size)
-                self.shared_memory[key] = shm.name
+                shm = SharedMemory(name=self.shared_memory[key])
                 data: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
                 j = vars_in_file.index(key)
                 data[:] = f[dset][j]
@@ -80,12 +92,9 @@ class AthdfFile:
         return idx
 
     def interpolate(self, x: np.ndarray, keys: tuple[str, ...]) -> np.ndarray:
-        if 'bitant' in self.coordinates:
-            if (mirror_z := x[0] < 0):
-                x[0] = -x[0]
-
-        if "spherical" in self.coordinates:
-            # convert to spherocal coordinates
+        if (mirror_z := (x[0] < 0) and self.bitant):
+            x[0] = -x[0]
+        if self.spherical:
             r = np.linalg.norm(x)
             theta = np.arccos(x[0]/r)
             phi = np.arctan2(x[1], x[2])
@@ -109,25 +118,13 @@ class AthdfFile:
             shm = SharedMemory(name=self.shared_memory[key])
             ar: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
             res[ii] = RegularGridInterpolator(xx, ar[imb])(x, method='linear')
-        if 'spherical' in self.coordinates and all(key.startswith('vel') for key in keys):
-            # convert back to cartesian
+
+        if self.spherical:
             jac = _rotjac(theta, phi)
             res = jac @ res
-        if 'bitant' in self.coordinates:
-            if mirror_z:
-                res[0] = -res[0]
+        if mirror_z:
+            res[0] = -res[0]
         return res
-
-    def free_shared_memory(self):
-        for key, name in self.shared_memory.items():
-            try:
-                shm = SharedMemory(name=name)
-            except FileNotFoundError:
-                print(f"Could not find shared memory for {key}")
-                continue
-            shm.close()
-            shm.unlink()
-        self.shared_memory = {}
 
     def __repr__(self):
         return f"AthdfFile({self.filename})"
@@ -135,38 +132,20 @@ class AthdfFile:
     def __str__(self):
         return self.filename
 
-################################################################################
-
 class AthdfInterpolator(Interpolator):
     coord_keys = ('x3', 'x2', 'x1')
     vel_keys = ('vel3', 'vel2', 'vel1')
-    data: tuple
 
-    def __init__(
-        self,
-        path: str,
-        data_keys: Iterable[str],
-        t_int_order: str = 'linear',
-        n_cpus: int = 1,
-        verbose: bool = False,
-        every: int = 1,
-        coordinates: str = "",
-    ):
+    def parse_files(self, path: str, every: int = 1) -> tuple[np.ndarray, np.ndarray, int]:
+        '''
+        returns an array of filnames and an array of the corresponding times
+        and the maximum memory size in bytes that one gridfunction needs
+        '''
 
-        self.path = path
-        self.data_keys = tuple(data_keys)
-        self.n_cpus = n_cpus
-        self.verbose = verbose
-        self.coordinates = coordinates
-        implemented = ('linear', 'cubic')
-        if t_int_order not in implemented:
-            raise ValueError(f"Time interpolation order {t_int_order} not implemented.")
-        self.t_int_order = t_int_order
+        _files: list[str] = []
+        _times: list[float] = []
 
-
-        files: list[str] = []
-        times: list[float] = []
-
+        mem_size = 0
         for ff in os.scandir(path):
             if not (ff.is_file() and ff.name.endswith('.athdf')):
                 continue
@@ -175,200 +154,36 @@ class AthdfInterpolator(Interpolator):
                 if not all(key in f.attrs['VariableNames'][:].astype(str)
                            for key in self.vel_keys+self.data_keys):
                     continue
-                files.append(ff.path)
-                times.append(float(f.attrs['Time'][()]))
+                _files.append(ff.path)
+                _times.append(float(f.attrs['Time'][()]))
+                nmb: int = int(f.attrs["NumMeshBlocks"])
+                mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
+                mem_size = max(mem_size, 8*nmb*int(np.prod(mb_size)))
 
-        self.files = np.array(files)
-        self.times = np.array(times)
+        files = np.array(_files)
+        times = np.array(_times)
 
-        if len(self.files) == 0:
-            raise ValueError(f'No files containing all keys found in {path}')
+        isort = np.argsort(times)
+        files = files[isort]
+        times = times[isort]
+        if every > 1:
+            last_t =times[-1]
+            last_f =files[-1]
+            times =times[::every]
+            files =files[::every]
+            if times[-1] != last_t:
+               times = np.append(_times, last_t)
+               files = np.append(_files, last_f)
 
-        isort = np.argsort(self.times)
-        self.files = self.files[isort]
-        self.times = self.times[isort]
-        self.times = self.times[::every]
-        self.files = self.files[::every]
+        return files,times, mem_size
 
-        self.athdfs: list[AthdfFile] = list()
+    def __init__(self, bitant: bool = False, spherical: bool = False, *args, **kwargs):
+        self.bitant = bitant
+        self.spherical = spherical
+        super.__init__(*args, **kwargs)
 
-        self.data = (self.athdfs, self.t_int_order, self.data_keys)
-
-    @staticmethod
-    def interpolate(
-        time: float,
-        coords: np.ndarray,
-        data: tuple,
-        mode: str,
-    ) -> np.ndarray:
-
-        files, order, keys  = data
-        if mode == 'velocity':
-            keys = AthdfInterpolator.vel_keys
-
-        times = np.array([f.time for f in files])
-        i_t = np.searchsorted(times, time, side='right')
-
-        if order == 'linear':
-            il = i_t -1
-            ir = i_t + 1
-        elif order == 'cubic':
-            il = i_t - 2
-            ir = i_t + 2
-        else:
-            raise ValueError(f"Time interpolation order {order} not implemented.")
-
-        if ir == len(files)+1:
-            ir -= 1
-            il -= 1
-        if il == -1:
-            il += 1
-            ir += 1
-
-        res = [f.interpolate(coords, keys=keys) for f in files[il:ir]]
-
-        if order == 'linear':
-            return res[0] + (time - times[il])*(res[1] - res[0])/(times[il+1] - times[il])
-        else:
-            return interp1d(times[il:ir], res, axis=0, kind=order)(time)
-
-    @staticmethod
-    def interpolate_velocities(
-        time: float,
-        coords: np.ndarray,
-        data: tuple,
-    ) -> np.ndarray:
-        return AthdfInterpolator.interpolate(time, coords, data, 'velocity')
-
-    @staticmethod
-    def interpolate_data(
-        time: float,
-        coords: np.ndarray,
-        data: tuple,
-    ) -> np.ndarray:
-        return AthdfInterpolator.interpolate(time, coords, data, 'data')
-
-    def load_data(
-        self,
-        t_span: tuple[float, float],
-    ):
-
-        self.free_shared_memory()
-
-        i_s = self.times.searchsorted(min(t_span), side='right') - 1
-        i_e = self.times.searchsorted(max(t_span), side='right')
-
-        if self.t_int_order == 'linear':
-            pass
-        elif self.t_int_order == 'cubic':
-            i_s -= 1
-            i_e += 1
-            if i_s < 0:
-                i_s = 0
-
-        files = self.files[i_s:i_e]
-
-        def load_file(ff):
-            return AthdfFile(ff, self.vel_keys+self.data_keys, self.coordinates)
-
-        self.athdfs[:] = do_parallel(
-            load_file,
-            files,
-            n_cpu=self.n_cpus,
-            desc=f"Loading files for t = {t_span[0]} - {t_span[1]}",
-            unit="file",
-            verbose=self.verbose,
-        )
-        self.athdfs.sort(key=lambda f: f.time)
-
-    def free_shared_memory(self):
-        for athdf in self.athdfs:
-            athdf.free_shared_memory()
-
-################################################################################
+    def load_file(self, args: tuple[str, dict[str, str]]) -> AthdfFile:
+        return AthdfFile(*args, bitant=self.bitant, spherical=self.spherical)
 
 class AthdfTracers(Tracers):
-    interpolator: AthdfInterpolator
-    vel_keys: tuple[str, ...] = ('vel3', 'vel2', 'vel1')
-
-    def __init__(
-        self,
-        path: str,
-        data_keys: Iterable[str],
-        n_cpu: int = 1,
-        reverse: bool = True,
-        files_per_step: int = 20,
-        t_int_order: str = 'linear',
-        coordinates: str = "",
-        every: int = 1,
-        verbose: bool = False,
-        **kwargs,
-    ):
-
-        self.path = path
-        self.data_keys = tuple(data_keys)
-        self.coordinates = coordinates
-        interpolator = AthdfInterpolator(
-            self.path,
-            data_keys=data_keys,
-            t_int_order=t_int_order,
-            every=every,
-            coordinates=coordinates,
-            verbose=verbose,
-        )
-
-        self.files_per_step = files_per_step
-        if t_int_order == 'linear':
-            self.step = files_per_step - 1
-        elif t_int_order == 'cubic':
-            self.step = files_per_step - 2
-        else:
-            raise ValueError(f"Time interpolation order {t_int_order} not implemented.")
-
-        super().__init__(
-            interpolator=interpolator,
-            n_cpu=n_cpu,
-            verbose=verbose,
-            **kwargs,
-        )
-        if reverse:
-            self.times = self.interpolator.times[::-1]
-            max_t = self.seeds['time'].max()
-            max_t = self.times[self.times > max_t][-1]
-            self.times = self.times[self.times <= max_t]
-        else:
-            self.times = self.interpolator.times
-            min_time = self.seeds['time'].min()
-            min_time = self.times[self.times < min_time][-1]
-            self.times = self.times[self.times >= min_time]
-
-
-    def integrate(self):
-        start_times = self.times[:-self.step:self.step]
-        start_times = np.append(start_times, self.times[-self.step])
-        end_times = self.times[self.step::self.step]
-        end_times = np.append(end_times, self.times[-1])
-
-        try:
-            for t_span in zip(start_times, end_times):
-                self.take_step(t_span)
-                if all(tr.finished for tr in self.tracers):
-                    break
-        finally:
-            self.interpolator.free_shared_memory()
-
-    def __del__(self):
-        if hasattr(self, "interpolator"):
-            self.interpolator.free_shared_memory()
-
-
-def _rotjac(theta, phi):
-    st = np.sin(theta)
-    ct = np.cos(theta)
-    sp = np.sin(phi)
-    cp = np.cos(phi)
-    return np.array([
-        [0, -st, ct],
-        [cp, ct*sp, st*sp],
-        [-sp, ct*cp, st*cp],
-    ])
+    interpolator_class = AthdfInterpolator
