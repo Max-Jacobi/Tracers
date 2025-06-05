@@ -85,15 +85,20 @@ class SurfaceInterpolator(FileInterpolator):
                 "tracer.hydro.aux.V_u_z")
     file_class = SurfaceFile
 
-    def parse_files(self, path: str, every: int = 1) -> tuple[np.ndarray, np.ndarray]:
-        files = []
-        times = []
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.grid = self.load_grid(self.filenames[0], every=self.every_grid)
+        self.shape = tuple(len(g) for g in self.grid)
+
+    def parse_files(self, path: str, every: int = 1) -> tuple[np.ndarray, np.ndarray, int]:
+        _files = []
+        _times = []
         fnames = [ff.path for ff in os.scandir(path) if 'surface' in ff.name]
 
         def read_time(fpath):
             with h5.File(fpath, 'r') as f:
-                files.append(fpath)
-                times.append(float(f['coordinates/00/T'][:]))
+                _files.append(fpath)
+                _times.append(float(f['coordinates/00/T'][:]))
 
         do_parallel(
             read_time, fnames,
@@ -103,8 +108,8 @@ class SurfaceInterpolator(FileInterpolator):
             verbose=self.verbose,
             )
 
-        files = np.array(files)
-        times = np.array(times)
+        files = np.array(_files)
+        times = np.array(_times)
 
         if len(files) == 0:
             raise ValueError(f'No files found in {path}')
@@ -120,7 +125,7 @@ class SurfaceInterpolator(FileInterpolator):
             if times[-1] != last_t:
                 times = np.append(times, last_t)
                 files = np.append(files, last_f)
-        return files, times
+        return files, times, int(np.prod(self.shape))
 
     def load_grid(self, filename, every: np.ndarray | None) -> tuple[np.ndarray, ...]:
         """
@@ -133,12 +138,15 @@ class SurfaceInterpolator(FileInterpolator):
             r = np.array([float(f[f'coordinates/{ir:02d}/R'][:]) for ir in range(n_r)])
             th =  np.array(f['coordinates/00/th'][:])
             ph =  np.array(f['coordinates/00/ph'][:])
-            if len(ph)%2 != 0:
+            if (n_ph := len(ph))%2 != 0:
                 raise ValueError(f"Files have unqual number of points in phi direction (n_phi={n_ph})!")
             r = r[::every[0]]
             th = np.concatenate(([-th[0]], th[::every[1]], [th[0]+2*np.pi]))
             ph = np.concatenate(([-ph[0]], ph[::every[2]], [ph[0]+2*np.pi]))
         return (r, th, ph)
+
+    def load_file(self, args: tuple[str, dict[str, str]]) -> File:
+        return self.file_class(*args, grid=self.grid, every=self.every_grid)
 
 class SurfaceTracers(FileTracers):
     interpolator_class = SurfaceInterpolator

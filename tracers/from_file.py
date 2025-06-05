@@ -18,8 +18,7 @@ class File(ABC):
         self,
         filename: str,
         shm_names: dict[str, str],
-        grid: tuple[np.ndarray, ...],
-        every: np.ndarray,
+        *args, **kwargs
         ):
         '''
         loads all keys in the file into the shared memories given by shm_names
@@ -38,8 +37,6 @@ class FileInterpolator(Interpolator, ABC):
     coord_keys: tuple[str, ...]
     vel_keys: tuple[str, ...]
     data: tuple
-    grid: tuple[np.ndarray, ...]
-    shape: tuple[int, ...]
     file_class: type
 
     def __init__(
@@ -52,59 +49,43 @@ class FileInterpolator(Interpolator, ABC):
         use_shared_memory: float | None = None,
         verbose: bool = False,
         every_time: int = 1,
-        every_grid: np.ndarray = np.ones(3, dtype=int),
+        every_grid: int | np.ndarray = 1,
     ):
         self.path = path
         self.data_keys = tuple(data_keys)
         self.n_cpu = n_cpu
         self.verbose = verbose
+        self.dim = len(self.vel_keys)
         implemented = ('linear', 'cubic')
         if t_int_order not in implemented:
             raise ValueError(f"Time interpolation order {t_int_order} not implemented.")
         self.t_int_order = t_int_order
+        if isinstance(every_grid, int):
+            every_grid = np.ones(self.dim, int)*every_grid
         self.every_grid = every_grid
 
         self.filenames, self.times = self.parse_files(path, every=every_time)
-
-        self.grid = self.load_grid(self.filenames[0], every=every_grid)
-        self.shape = tuple(len(g) for g in self.grid)
+        self.max_size = 8*int(max(np.prod(sh) for sh in self.shapes))
 
         self.files: list[File] = list()
         self.data = (self.files, self.t_int_order, self.data_keys, self.vel_keys)
 
-        # Ensure shared mempry cleanup on SIGTERM
-        def handler(signum, frame):
-            os.write(2, b"SIGTERM received\n")
-            os.write(2, b" Cleaning up shared memory\n")
-            self.free_shared_memory()
-            os.write(2, b" Cleaning up worker pool\n")
-            cleanup_pool()
-            os.write(2, b" Done\n")
-            os._exit(1)
-
-        signal.signal(signal.SIGTERM, handler)
-
         self.allocate_shm(files_per_step, use_shared_memory)
 
-
     @abstractmethod
-    def parse_files(self, path: str, every: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    def parse_files(self, path: str, every: int = 1) -> tuple[np.ndarray, np.ndarray, int]:
         '''
         returns an array of filnames and an array of the corresponding times
+        and the maximum memory size in bytes that one gridfunction needs
         '''
         ...
 
 
-    @abstractmethod
-    def load_grid(self, filename, every: np.ndarray | None) -> tuple[np.ndarray, ...]:
-        """
-        Loads the grid and returns the axis as tuple of np arrays
-        """
-        ...
-
-
-    def allocate_shm(self, files_per_step: int|None, req_mem: float|None):
-        mem_size = 8*int(np.prod(self.shape))
+    def allocate_shm(
+        self,
+        files_per_step: int|None,
+        req_mem: float|None,
+        ):
         keys = np.unique(self.vel_keys+self.data_keys)
 
         st = os.statvfs("/dev/shm")
@@ -114,22 +95,33 @@ class FileInterpolator(Interpolator, ABC):
             ...
         elif req_mem is not None:
             req_mem = req_mem*1024**2
-            files_per_step = int(req_mem/len(keys)/mem_size)
+            files_per_step = int(req_mem/len(keys)/self.max_size)
         else:
             raise RuntimeError("Must either supply use_shared_memory or files_per_step argument")
-        self.req_mem = len(keys)*files_per_step*mem_size
+        self.req_mem = len(keys)*files_per_step*self.max_size
         self.files_per_step = files_per_step
 
         print(f"Allocating shared memory for {self.files_per_step} files and {len(keys)} grid functions "
-              f"using {self.req_mem/1024**3:.2f}GB of memory.", flush=True)
+              f"using {self.req_mem/1024**self.dim:.2f}GB of memory.", flush=True)
         if free_mem < 1.2*req_mem:
-            raise RuntimeError(f"This configuration would request to much memory. Free: {free_mem/1024**3}GB")
+            raise RuntimeError(f"This configuration would request to much memory. Free: {free_mem/1024**self.dim}GB")
 
-        self.shared_memory =  [{key: SharedMemory(create=True, size=mem_size).name
+        # Ensure shared mempry cleanup on SIGTERM
+        def handler(signum, frame):
+            os.write(2, b"SIGTERM received\n")
+            os.write(2, b" Cleaning up shared memory\n")
+            self.free_shared_memory()
+            os.write(2, b" Done\n")
+            os._exit(1)
+
+        signal.signal(signal.SIGTERM, handler)
+
+        self.shared_memory =  [{key: SharedMemory(create=True, size=self.max_size).name
                                 for key in keys} for _ in range(self.files_per_step)]
 
+    @abstractmethod
     def load_file(self, args: tuple[str, dict[str, str]]) -> File:
-        return self.file_class(*args, grid=self.grid, every=self.every_grid)
+        ...
 
     def load_data(
         self,
@@ -202,8 +194,7 @@ class FileInterpolator(Interpolator, ABC):
         coords: np.ndarray,
         data: tuple,
     ) -> np.ndarray:
-        vel =  FileInterpolator.interpolate(time, coords, data, 'velocity')
-        return vel
+        ...
 
     @staticmethod
     def interpolate_data(
@@ -211,7 +202,7 @@ class FileInterpolator(Interpolator, ABC):
         coords: np.ndarray,
         data: tuple,
     ) -> np.ndarray:
-        return FileInterpolator.interpolate(time, coords, data, 'data')
+        ...
 
     def free_shared_memory(self):
         for file_shm in self.shared_memory:
@@ -239,15 +230,13 @@ class FileTracers(Tracers, ABC):
         use_shared_memory: float | None = None,
         t_int_order: str = 'linear',
         every_time: int = 1,
-        every_grid: int | np.ndarray = np.ones(3, dtype=int),
+        every_grid: int | np.ndarray = 1,
         verbose: bool = False,
         **kwargs,
     ):
 
         self.path = path
         self.data_keys = tuple(data_keys)
-        if isinstance(every_grid, int):
-            every_grid = np.ones(3, int)*every_grid
         interpolator = self.interpolator_class(
             self.path,
             data_keys=data_keys,
