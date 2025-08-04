@@ -9,6 +9,10 @@ from scipy.interpolate import interp1d
 
 from . import Tracers, Interpolator, do_parallel
 
+_1kb = 1024
+_1mb = _1kb*_1kb
+_1gb = _1kb*_1kb*_1kb
+
 class File(ABC):
     time: float
     filename: str
@@ -110,7 +114,7 @@ class FileInterpolator(Interpolator, ABC):
         free_mem = st.f_bavail * st.f_frsize
 
         if files_per_step is None and req_mem is not None:
-            req_mem = req_mem*1024**2
+            req_mem = req_mem*_1mb
             files_per_step = int(req_mem/len(keys)/self.max_size)
         elif ((files_per_step is None and req_mem is None) or
               (files_per_step is not None and req_mem is not None)):
@@ -118,10 +122,13 @@ class FileInterpolator(Interpolator, ABC):
         self.req_mem = len(keys)*files_per_step*self.max_size
         self.files_per_step = files_per_step
 
-        print(f"Allocating shared memory for {self.files_per_step} files and {len(keys)} grid functions "
-              f"using {self.req_mem/1024**self.dim:.2f}GB of memory.", flush=True)
+        if self.verbose:
+            print(f"Allocating shared memory for "
+                  f"{self.files_per_step} files and {len(keys)} grid functions "
+                  f"using {self.req_mem/_1gb:.2f}GB of memory.", flush=True)
         if free_mem < 1.2*self.req_mem:
-            raise RuntimeError(f"This configuration would request to much memory. Free: {free_mem/1024**self.dim}GB")
+            raise RuntimeError(f"This configuration would request to much memory. "
+                               f"Free: {free_mem/_1gb}GB")
 
         # Ensure shared mempry cleanup on SIGTERM
         def handler(signum, frame):
@@ -160,7 +167,7 @@ class FileInterpolator(Interpolator, ABC):
             self.load_file,
             list(zip(files, self.shared_memory)),
             n_cpu=self.n_cpu,
-            desc=f"Loading files for t = {t_span[0]} - {t_span[1]}",
+            desc=f"Loading files for t = {t_span[0]:6f} - {t_span[1]:6f}",
             unit="files",
             verbose=self.verbose,
         )

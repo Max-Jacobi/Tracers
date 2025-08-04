@@ -279,8 +279,8 @@ class Tracers:
         self.tracers = do_parallel(
             func=self._integrate_inner,
             args=args,
-            desc=f"Integrating t = {t_span[0]:.0f} - {t_span[1]:.0f}",
-            unit='tracer',
+            desc=f"Integrating t = {t_span[0]:6f} - {t_span[1]:6f}",
+            unit='tracers',
             n_cpu=self.n_cpu,
             verbose=self.verbose,
         )
@@ -314,8 +314,8 @@ class Tracers:
         self.tracers = do_parallel(
             func=self._interpolate_inner,
             args=args,
-            desc=f"Interpolating t = {t_span[0]:.0f} - {t_span[1]:.0f}",
-            unit='tracer',
+            desc=f"Interpolating t = {t_span[0]:6f} - {t_span[1]:6f}",
+            unit='tracers',
             n_cpu=self.n_cpu,
             verbose=self.verbose,
         )
@@ -327,7 +327,7 @@ class Tracers:
                 func=end_condition,
                 args=self.tracers,
                 desc=f"Checking condition {ii+1}/{len(self.end_conditions)}",
-                unit='tracer',
+                unit='tracers',
                 n_cpu=self.n_cpu,
                 verbose=self.verbose,
             )
