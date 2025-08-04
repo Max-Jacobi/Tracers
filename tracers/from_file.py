@@ -112,7 +112,8 @@ class FileInterpolator(Interpolator, ABC):
         if files_per_step is None and req_mem is not None:
             req_mem = req_mem*1024**2
             files_per_step = int(req_mem/len(keys)/self.max_size)
-        else:
+        elif ((files_per_step is None and req_mem is None) or
+              (files_per_step is not None and req_mem is not None)):
             raise RuntimeError("Must either supply use_shared_memory or files_per_step argument")
         self.req_mem = len(keys)*files_per_step*self.max_size
         self.files_per_step = files_per_step

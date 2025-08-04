@@ -39,7 +39,6 @@ class SurfaceFile(File):
         self,
         filename: str,
         shm_names: dict[str, str],
-        coord_keys: tuple[str],
         grid: tuple[np.ndarray, np.ndarray, np.ndarray],
         every: np.ndarray = np.ones(3, dtype=int),
     ):
@@ -79,7 +78,6 @@ class SurfaceInterpolator(FileInterpolator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.file_args = dict(
-            coord_keys=self.coord_keys,
             grid=self.grid,
             every=self.every_grid,
         )

@@ -23,11 +23,12 @@ def _rotjac(theta, phi):
     ])
 
 class AthdfFile(File):
+    coord_keys = ('x3', 'x2', 'x1')
+
     def __init__(
         self,
         filename: str,
         shm_names: dict[str, str],
-        coord_keys: tuple[str],
         bitant: bool = False,
         spherical: bool = False,
     ):
@@ -49,7 +50,7 @@ class AthdfFile(File):
             self.full_shape = (nmb, *mb_size)
             self.shape = tuple(mb_size)
 
-            self.grid = np.array([f[f'{key}v'][:] for key in coord_keys]).T
+            self.grid = np.array([f[f'{key}v'][:] for key in self.coord_keys]).T
             self.origins = np.array([x[1] for x in self.grid])
             self.ends = np.array([x[-2] for x in self.grid])
 
