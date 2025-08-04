@@ -96,7 +96,8 @@ trs = AthdfTracers(
     t_int_order='linear',
     files_per_step=n_cpu*2,
     end_conditions=[check_flag,],
-    coordinates='spherical bitant',
+    spherical=True,
+    bitant=True,
     events=[oob, oot],
 )
 
