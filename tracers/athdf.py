@@ -1,6 +1,7 @@
 ################################################################################
-from multiprocessing.shared_memory import SharedMemory
 import os
+from multiprocessing.shared_memory import SharedMemory
+from itertools import repeat
 
 import numpy as np
 import h5py as h5
@@ -50,9 +51,10 @@ class AthdfFile(File):
             self.full_shape = (nmb, *mb_size)
             self.shape = tuple(mb_size)
 
-            self.grid = np.array([f[f'{key}v'][:] for key in self.coord_keys]).T
-            self.origins = np.array([x[1] for x in self.grid])
-            self.ends = np.array([x[-2] for x in self.grid])
+            self.grid = np.array([f[f'{key}v'][:] for key in self.coord_keys])
+            self.grid = self.grid.transpose((1, 0, 2))
+            self.origins = np.array([x[:, 1] for x in self.grid])
+            self.ends = np.array([x[:, -2] for x in self.grid])
 
             for key, shm_name in self.shared_memory.items():
                 shm = SharedMemory(name=shm_name)
@@ -91,13 +93,16 @@ class AthdfFile(File):
             # out of bounds
             return np.zeros_like(x)
 
-        xx = (self.x3[imb], self.x2[imb], self.x1[imb])
+        grid = self.grid[imb]
 
         res = np.empty(len(keys))
         for ii, key in enumerate(keys):
             shm = SharedMemory(name=self.shared_memory[key])
             ar: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
-            res[ii] = RegularGridInterpolator(xx, ar[imb])(x, method='linear')
+            res[ii] = RegularGridInterpolator(
+                grid, ar[imb],
+                bounds_error=False, fill_value=None
+                )(x, method='linear')
 
         if self.spherical and keys==AthdfInterpolator.vel_keys:
             jac = _rotjac(theta, phi)
@@ -105,6 +110,19 @@ class AthdfFile(File):
         if mirror_z:
             res[0] = -res[0]
         return res
+
+def read_time(path_keys: tuple[str, tuple[str]]):
+    fpath, keys = path_keys
+    with h5.File(fpath, 'r') as f:
+        if not all(key in f.attrs['VariableNames'][:].astype(str)
+                   for key in keys):
+            return [], [], 0
+        files = [fpath]
+        times = [float(f.attrs['Time'][()])]
+        nmb: int = int(f.attrs["NumMeshBlocks"])
+        mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
+        mem_size = 8*nmb*int(np.prod(mb_size))
+    return files, times, mem_size
 
 class AthdfInterpolator(FileInterpolator):
     coord_keys = ('x3', 'x2', 'x1')
@@ -121,31 +139,19 @@ class AthdfInterpolator(FileInterpolator):
         and the maximum memory size in bytes that one gridfunction needs
         '''
 
-        files: list[str] = []
-        times: list[float] = []
-
-        mem_size = 0
-
         fnames = [ff.path for ff in os.scandir(path) if ff.name.endswith('.athdf')]
-        def read_time(fpath):
-            nonlocal mem_size
-            with h5.File(fpath, 'r') as f:
-                if not all(key in f.attrs['VariableNames'][:].astype(str)
-                           for key in self.vel_keys+self.data_keys):
-                    return
-                files.append(fpath)
-                times.append(float(f.attrs['Time'][()]))
-                nmb: int = int(f.attrs["NumMeshBlocks"])
-                mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
-                mem_size = max(mem_size, 8*nmb*int(np.prod(mb_size)))
 
-        do_parallel(
-            read_time, fnames,
-            n_cpu=1,
+        res = do_parallel(
+            read_time, list(zip(fnames, repeat(self.vel_keys+self.data_keys))),
+            n_cpu=4,
             desc="Parsing file times",
             unit="files",
             verbose=self.verbose,
             )
+
+        files = sum((r[0] for r in res), start=[])
+        times = sum((r[1] for r in res), start=[])
+        mem_size = max(r[2] for r in res)
 
         return np.array(files), np.array(times), mem_size
 
