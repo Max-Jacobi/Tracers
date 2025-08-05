@@ -143,7 +143,7 @@ class AthdfInterpolator(FileInterpolator):
 
         res = do_parallel(
             read_time, list(zip(fnames, repeat(self.vel_keys+self.data_keys))),
-            n_cpu=4,
+            n_cpu=self.n_cpu,
             desc="Parsing file times",
             unit="files",
             verbose=self.verbose,
