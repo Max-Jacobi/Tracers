@@ -53,6 +53,13 @@ class AthdfFile(File):
 
             self.grid = np.array([f[f'{key}v'][:] for key in self.coord_keys])
             self.grid = self.grid.transpose((1, 0, 2))
+            # check for mirrored theta ghost zones at the poles
+            if self.spherical:
+                for imb, gr in enumerate(self.grid):
+                    if (ghost_mask := np.diff(gr[1, :6]) <= 0).any():
+                        self.grid[imb, 1, :5][ghost_mask] *= -1
+                    if (ghost_mask := np.diff(gr[1, -6:]) <= 0).any():
+                        self.grid[imb, 1, -5:][ghost_mask] = 2*np.pi - gr[1, -5:][ghost_mask]
             self.origins = np.array([x[:, 1] for x in self.grid])
             self.ends = np.array([x[:, -2] for x in self.grid])
 
