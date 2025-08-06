@@ -25,6 +25,8 @@ def _rotjac(theta, phi):
 
 class AthdfFile(File):
     coord_keys = ('x3', 'x2', 'x1')
+    vel_keys = ('vel3', 'vel2', 'vel1')
+    kwargs = ("bitant", "spherical", "Wv_fix", "mass")
 
     def __init__(
         self,
@@ -32,6 +34,8 @@ class AthdfFile(File):
         shm_names: dict[str, str],
         bitant: bool = False,
         spherical: bool = False,
+        Wv_fix: bool = False,
+        mass: float = 0,
     ):
 
         self.filename = filename
@@ -68,6 +72,26 @@ class AthdfFile(File):
                 data: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
                 j = vars_in_file.index(key)
                 data[:] = f[dset][j]
+
+            if Wv_fix:
+                self.fix_velocities(mass)
+
+    def fix_velocities(self, mass=0):
+        shared_mem = [SharedMemory(name=self.shared_memory[key]) for key in self.vel_keys]
+        util = [np.ndarray(self.full_shape, dtype=float, buffer=shm.buf) for shm in shared_mem]
+        for imb, coords in enumerate(self.grid):
+            coords = np.meshgrid(*coords, indexing='ij')
+            if self.spherical:
+                _, th, rr = coords
+                r2 = rr*rr
+                gam = [np.sin(th)**2*r2, r2, (1-2*mass/rr)**-0.5]
+            else:
+                rr = np.sqrt(sum(x*x for x in coords))
+                gam = 3*[(1-2*mass/rr)**-0.5]
+
+            W = np.sqrt(1 + sum(u[imb]*u[imb]*g for u, g in zip(util, gam)))
+            for i in range(3):
+                util[i][imb] /= W
 
     def get_mb_index(
         self,
@@ -136,8 +160,10 @@ class AthdfInterpolator(FileInterpolator):
     vel_keys = ('vel3', 'vel2', 'vel1')
     file_class = AthdfFile
 
-    def __init__(self, *args, bitant: bool = False, spherical: bool = False, **kwargs):
-        self.file_args = dict(bitant=bitant, spherical=spherical)
+    def __init__(self, *args, **kwargs):
+        self.file_args = {key: kwargs.pop(key)
+                          for key in AthdfFile.kwargs
+                          if key in kwargs}
         super().__init__(*args, **kwargs)
 
     def parse_files(self, path: str) -> tuple[np.ndarray, np.ndarray, int]:
@@ -165,6 +191,8 @@ class AthdfInterpolator(FileInterpolator):
 class AthdfTracers(FileTracers):
     interpolator_class = AthdfInterpolator
 
-    def __init__(self, *args, bitant: bool = False, spherical: bool = False, **kwargs):
-        self.interp_kwargs = dict(bitant=bitant, spherical=spherical)
+    def __init__(self, *args, **kwargs):
+        self.interp_kwargs = {key: kwargs.pop(key)
+                              for key in AthdfFile.kwargs
+                              if key in kwargs}
         super().__init__(*args, **kwargs)
