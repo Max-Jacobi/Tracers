@@ -2,6 +2,7 @@
 import os
 from multiprocessing.shared_memory import SharedMemory
 from itertools import repeat
+from functools import reduce
 
 import numpy as np
 import h5py as h5
@@ -30,7 +31,7 @@ class AthdfFile(File):
 
     def __init__(
         self,
-        filename: str,
+        filenames: dict[str, tuple[str, ...]],
         shm_names: dict[str, str],
         bitant: bool = False,
         spherical: bool = False,
@@ -38,43 +39,44 @@ class AthdfFile(File):
         mass: float = 0,
     ):
 
-        self.filename = filename
+        self.filenames = filenames
         self.shared_memory = shm_names
         self.bitant = bitant
         self.spherical = spherical
 
-        with h5.File(filename, 'r') as f:
-            self.time = float(f.attrs['Time'][()])
+        for filename, keys in self.filenames.items():
+            with h5.File(filename, 'r') as f:
+                self.time = float(f.attrs['Time'][()])
 
-            vars_in_file = list(f.attrs['VariableNames'][:].astype(str))
-            nmb: int = int(f.attrs["NumMeshBlocks"])
-            mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
+                vars_in_file = list(f.attrs['VariableNames'][:].astype(str))
+                nmb: int = int(f.attrs["NumMeshBlocks"])
+                mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
 
-            # assume all grid functions are in the first dataset
-            dset = f.attrs['DatasetNames'][0].decode('utf-8')
-            self.full_shape = (nmb, *mb_size)
-            self.shape = tuple(mb_size)
+                # assume all grid functions are in the first dataset
+                dset = f.attrs['DatasetNames'][0].decode('utf-8')
+                self.full_shape = (nmb, *mb_size)
+                self.shape = tuple(mb_size)
 
-            self.grid = np.array([f[f'{key}v'][:] for key in self.coord_keys])
-            self.grid = self.grid.transpose((1, 0, 2))
-            # check for mirrored theta ghost zones at the poles
-            if self.spherical:
-                for imb, coord in enumerate(self.grid):
-                    if (ghost_mask := np.diff(coord[1, :6]) <= 0).any():
-                        self.grid[imb, 1, :5][ghost_mask] *= -1
-                    if (ghost_mask := np.diff(coord[1, -6:]) <= 0).any():
-                        self.grid[imb, 1, -5:][ghost_mask] = 2*np.pi - coord[1, -5:][ghost_mask]
-            self.origins = np.array([x[:, 1] for x in self.grid])
-            self.ends = np.array([x[:, -2] for x in self.grid])
+                self.grid = np.array([f[f'{key}v'][:] for key in self.coord_keys])
+                self.grid = self.grid.transpose((1, 0, 2))
+                # check for mirrored theta ghost zones at the poles
+                if self.spherical:
+                    for imb, coord in enumerate(self.grid):
+                        if (ghost_mask := np.diff(coord[1, :6]) <= 0).any():
+                            self.grid[imb, 1, :5][ghost_mask] *= -1
+                        if (ghost_mask := np.diff(coord[1, -6:]) <= 0).any():
+                            self.grid[imb, 1, -5:][ghost_mask] = 2*np.pi - coord[1, -5:][ghost_mask]
+                self.origins = np.array([x[:, 1] for x in self.grid])
+                self.ends = np.array([x[:, -2] for x in self.grid])
 
-            for key, shm_name in self.shared_memory.items():
-                shm = SharedMemory(name=shm_name)
-                data: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
-                j = vars_in_file.index(key)
-                data[:] = f[dset][j]
+                for key in keys:
+                    shm = SharedMemory(name=self.shared_memory[key])
+                    data: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
+                    j = vars_in_file.index(key)
+                    data[:] = f[dset][j]
 
-            if gr:
-                self.transform_Wv(mass)
+        if gr:
+            self.transform_Wv(mass)
 
     def transform_Wv(self, mass: float):
         shared_mem = [SharedMemory(name=self.shared_memory[key]) for key in self.vel_keys]
@@ -150,18 +152,20 @@ class AthdfFile(File):
             res[0] = -res[0]
         return res
 
-def read_time(path_keys: tuple[str, tuple[str]]):
+def read_time(
+    path_keys: tuple[str, tuple[str]]
+    ) -> tuple[dict[float, dict[str, tuple[str, ...]]], int]:
     fpath, keys = path_keys
     with h5.File(fpath, 'r') as f:
-        if not all(key in f.attrs['VariableNames'][:].astype(str)
-                   for key in keys):
-            return [], [], 0
-        files = [fpath]
-        times = [float(f.attrs['Time'][()])]
+        file_keys = f.attrs['VariableNames'][:].astype(str)
+        avail_keys = tuple(key for key in keys if key in file_keys)
+        if not any(avail_keys):
+            return dict(), 0
+        time = float(f.attrs['Time'][()])
         nmb: int = int(f.attrs["NumMeshBlocks"])
         mb_size: np.ndarray = f.attrs['MeshBlockSize'][:].astype(int)
         mem_size = 8*nmb*int(np.prod(mb_size))
-    return files, times, mem_size
+    return {time: {fpath: avail_keys}}, mem_size
 
 class AthdfInterpolator(FileInterpolator):
     coord_keys = ('x3', 'x2', 'x1')
@@ -174,10 +178,11 @@ class AthdfInterpolator(FileInterpolator):
                           if key in kwargs}
         super().__init__(*args, **kwargs)
 
-    def parse_files(self, path: str) -> tuple[np.ndarray, np.ndarray, int]:
+    def parse_files(self, path: str) -> tuple[dict, int]:
         '''
-        returns an array of filnames and an array of the corresponding times
-        and the maximum memory size in bytes that one gridfunction needs
+        returns a nested dictoary containing the file times, the file names and
+        the contained keys as well as the maximum memory size in bytes that one
+        gridfunction needs.
         '''
 
         fnames = [ff.path for ff in os.scandir(path) if ff.name.endswith('.athdf')]
@@ -190,11 +195,20 @@ class AthdfInterpolator(FileInterpolator):
             verbose=self.verbose,
             )
 
-        files = sum((r[0] for r in res), start=[])
-        times = sum((r[1] for r in res), start=[])
-        mem_size = max(r[2] for r in res)
+        def combine_dict(do, dn):
+            dn = dn[0]
+            for t in dn:
+                if t in do:
+                    do[t] = {**do[t], **dn[t]}
+                else:
+                    do[t] = dn[t]
+            return do
 
-        return np.array(files), np.array(times), mem_size
+
+        file_dict = reduce(combine_dict, res, {})
+        mem_size = max(r[1] for r in res)
+
+        return file_dict, mem_size
 
 class AthdfTracers(FileTracers):
     interpolator_class = AthdfInterpolator

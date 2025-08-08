@@ -15,12 +15,11 @@ _1gb = _1kb*_1kb*_1kb
 
 class File(ABC):
     time: float
-    filename: str
 
     @abstractmethod
     def __init__(
         self,
-        filename: str,
+        filenames: dict[str, tuple[str, ...]],
         shm_names: dict[str, str],
         *args, **kwargs
         ):
@@ -37,10 +36,10 @@ class File(ABC):
         ...
 
     def __repr__(self):
-        return f"<{type(self)} {self.filename}>"
+        return f"<{type(self)} t={self.time}>"
 
     def __str__(self):
-        return self.filename
+        return self.__repr__()
 
 
 
@@ -75,19 +74,21 @@ class FileInterpolator(Interpolator, ABC):
             every_grid = np.ones(self.dim, int)*every_grid
         self.every_grid = every_grid
 
-        self.filenames, self.times, self.max_size = self.parse_files(path)
+        self.file_dict, self.max_size = self.parse_files(path)
+        self.times = np.array(list(self.file_dict.keys()))
+        load_keys = np.array(self.vel_keys+self.data_keys)
+        for t in self.times:
+            fkeys = sum(self.file_dict[t].values(), start=())
+            if any(missing := np.array([k not in fkeys for k in load_keys])):
+                raise ValueError(f"Keys {load_keys[missing]} missing in timestep {t}")
 
         isort = np.argsort(self.times)
-        self.filenames = self.filenames[isort]
         self.times = self.times[isort]
         if every_time > 1:
             last_t = self.times[-1]
-            last_f = self.filenames[-1]
             self.times = self.times[::every_time]
-            self.filenames = self.filenames[::every_time]
             if self.times[-1] != last_t:
                self.times = np.append(self.times, last_t)
-               self.filenames = np.append(self.filenames, last_f)
 
         self.files: list[File] = list()
         self.data = (self.files, self.t_int_order, self.data_keys, self.vel_keys)
@@ -95,10 +96,11 @@ class FileInterpolator(Interpolator, ABC):
         self.allocate_shm(files_per_step, use_shared_memory)
 
     @abstractmethod
-    def parse_files(self, path: str) -> tuple[np.ndarray, np.ndarray, int]:
+    def parse_files(self, path: str) -> tuple[dict, int]:
         '''
-        returns an array of filnames and an array of the corresponding times
-        and the maximum memory size in bytes that one gridfunction needs
+        returns a nested dictoary containing the file times, the file names and
+        the contained keys as well as the maximum memory size in bytes that one
+        gridfunction needs.
         '''
         ...
 
@@ -161,11 +163,11 @@ class FileInterpolator(Interpolator, ABC):
             if i_s < 0:
                 i_s = 0
 
-        files = self.filenames[i_s:i_e]
+        times = self.times[i_s:i_e]
 
         self.files[:] = do_parallel(
             self.load_file,
-            list(zip(files, self.shared_memory)),
+            list(zip((self.file_dict[t] for t in times), self.shared_memory)),
             n_cpu=self.n_cpu,
             desc=f"Loading files for t = {t_span[0]:6f} - {t_span[1]:6f}",
             unit="files",
