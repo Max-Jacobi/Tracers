@@ -9,10 +9,12 @@ from tracers import do_parallel, Tracer
 
 try:
     i_pr = int(os.environ["SLURM_PROCID"])
-    n_pr  = int(os.environ["SLURM_NPROCS"])
+    n_pr = int(os.environ["SLURM_NPROCS"])
+    n_cpu = int(os.environ["SLURM_NTASKS_PER_CORE"])
 except KeyError:
     i_pr = 0
     n_pr = 1
+    n_cpu = 1
 
 path = "new_files"
 
@@ -30,7 +32,6 @@ mem_mb = 6e3 # 6GB
 nr = 5
 nphi = 36
 ntheta = 9
-n_cpu = 6
 
 #nr = 1
 #nphi = 2
