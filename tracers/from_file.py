@@ -121,6 +121,7 @@ class FileInterpolator(Interpolator, ABC):
         elif ((files_per_step is None and req_mem is None) or
               (files_per_step is not None and req_mem is not None)):
             raise RuntimeError("Must either supply use_shared_memory or files_per_step argument")
+        files_per_step = min(files_per_step, len(self.times))
         self.req_mem = len(keys)*files_per_step*self.max_size
         self.files_per_step = files_per_step
 

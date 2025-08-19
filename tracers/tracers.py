@@ -104,7 +104,7 @@ class Tracer(Mapping):
         self.message = str(error)
 
     def output_to_ascii(self, filebase: str) -> str:
-        keys = ['time', *self.coord_keys, *self.data_keys]
+        keys = list(self.trajectory.keys())
 
         props = "; ".join((f"{key}={val}" for key, val in self.props.items()))
         legend = "{:>23s}" + "{:>26s}"* (len(keys) - 1)
@@ -196,6 +196,7 @@ class Tracers:
         t_eval: None | np.ndarray = None,
         timeout: float = -1.0,
         events: list[Callable] = [],
+        index_offset: int = 0,
         **kwargs,
     ):
         self.coord_keys = interpolator.coord_keys
@@ -207,6 +208,7 @@ class Tracers:
         self.end_conditions = end_conditions
         self.timeout = timeout
         self.t_eval = t_eval
+        self.index_offset = index_offset
         self.kwargs = kwargs
         self.kwargs['events'] = events
 
@@ -225,7 +227,7 @@ class Tracers:
                      if key not in self.coord_keys and key != 'time']
         props = [{key: self.seeds[key][ii] for key in prop_keys} for ii in range(len(time))]
 
-        self.tracers =  [Tracer(pos, t, ii, self.coord_keys, self.data_keys, props=pp)
+        self.tracers =  [Tracer(pos, t, ii+self.index_offset, self.coord_keys, self.data_keys, props=pp)
                          for ii, (*pos, t, pp) in enumerate(zip(*coords, time, props))]
 
     @staticmethod

@@ -1,23 +1,37 @@
 ################################################################################
-import sys
+import os
 import numpy as np
 
-sys.path.append("/home/ho54hof/repos/Tracers")
 from tracers.athdf import AthdfTracers
 from tracers import do_parallel, Tracer
 
 ################################################################################
 
-path = "files"
+try:
+    i_pr = int(os.environ["SLURM_PROCID"])
+    n_pr  = int(os.environ["SLURM_NPROCS"])
+except KeyError:
+    i_pr = 0
+    n_pr = 1
 
-rmin = 500
-rmax = 1.5e5
-time = 2e5
+path = "new_files"
 
-nr = 12
+t_start = 2e3 
+t_end = 0
+r_end = 300
+r_min = 500
+r_max = 0.5*t_start
+
+max_dt = 20.3
+atmo_cut = 0.9
+rand_seed = 42
+mem_mb = 6e3 # 6GB
+
+nr = 5
 nphi = 36
 ntheta = 9
-n_cpu = 36
+n_cpu = 6
+
 #nr = 1
 #nphi = 2
 #ntheta = 2
@@ -27,33 +41,43 @@ n_cpu = 36
 
 # setup of seeds
 
-rr = np.linspace(rmin**3, rmax**3, nr+1)**(1/3)
-phi = np.linspace(0, 2*np.pi, nphi+1)[:-1]
-cost = np.linspace(0, 1, ntheta+1)[:-1]
+time = np.array([t_start])
+dt = 0
 
+rr = np.linspace(r_min**3, r_max**3, nr+1)**(1/3)
 dr = np.diff(rr)
-dphi = phi[1] - phi[0]
-dct = cost[1] - cost[0]
-
 rr = rr[:-1]
 rr += dr/2
+
+phi = np.linspace(0, 2*np.pi, nphi+1)[:-1]
+dphi = phi[1] - phi[0]
+phi += dphi/2
+
+cost = np.linspace(0, 1, ntheta+1)[:-1]
+dct = cost[1] - cost[0]
 cost += dct/2
 
-rr, phi, cost = np.meshgrid(rr, phi, cost, indexing='ij')
+# time first so tracers with similar start times are started on the same rank
+time, rr, phi, cost = np.meshgrid(time, rr, phi, cost, indexing='ij')
+dr = dr[None, :, None, None]
 
-dvol = rr**2 * dr[:, None, None]*dct*dphi
+dvol = rr**2 * dr*dct*dphi
+if dt>0:
+    dvol *= dt
 
 ################################################################################
 
-rr += np.random.uniform(-0.5, 0.5, size=rr.shape)*dr[:, None, None]
+np.random.seed(rand_seed)
+time += np.random.uniform(-0.5, 0.5, size=time.shape)*dt
+rr += np.random.uniform(-0.5, 0.5, size=rr.shape)*dr
 phi += np.random.uniform(-0.5, 0.5, size=phi.shape)*dphi
 cost += np.random.uniform(-0.5, 0.5, size=cost.shape)*dct
 
+time = time.flatten()
 rr = rr.flatten()
 phi = phi.flatten()
 cost = cost.flatten()
 dvol = dvol.flatten()
-time = np.ones_like(rr)*time
 
 sint = np.sqrt(1 - cost**2)
 seeds = dict(
@@ -64,41 +88,51 @@ seeds = dict(
     dvol=dvol,
 )
 
+n_tr = len(rr)
+i_off = np.array_split(np.arange(n_tr), n_pr)[i_pr][0]
+i_end = np.array_split(np.arange(n_tr), n_pr)[i_pr][-1]
+print(f"Calculating tracers {i_off}-{i_end} on rank {i_pr}", flush=True)
+if n_pr > 1:
+    seeds = {k: np.array_split(v, n_pr)[i_pr] for k, v in seeds.items()}
+verbose = i_pr == 0
+
 ################################################################################
 
 # domain bounderies
 def oob(t: float, x: np.ndarray, *_) -> float:
     r = np.sqrt(np.sum(x**2))
-    return r - 400
+    return r - r_end
 oob.direction = -1
 oob.terminal = True
 
 def oot(t: float, *_) -> float:
-    return t
+    return t - t_end
 
 oot.direction = -1
 oot.terminal = True
 
 def check_flag(tr: Tracer) -> Tracer:
-    if np.any(tr.trajectory['rFlag'] < .1):
+    if np.any(tr.trajectory['rFlag'] < atmo_cut):
         tr.finished = tr.failed = True
-        tr.message = "rFlag < 0.1"
+        tr.message = f"rFlag < {atmo_cut}"
     return tr
 
 ################################################################################
 
 trs = AthdfTracers(
     path,
-    data_keys=['rho', 'rYE', 'rENT', 'rAbar'],
+    data_keys=['rho', 'rYE', 'rENT', 'rAbar', 'rFlag', 'Temperature', "h", "u_t", "user_out_var3"],
     seeds=seeds,
     n_cpu=n_cpu,
-    verbose=True,
+    verbose=verbose,
+    max_step=max_dt,
     t_int_order='linear',
-    files_per_step=n_cpu*2,
     end_conditions=[check_flag,],
+    use_shared_memory=mem_mb,
     spherical=True,
     bitant=True,
     events=[oob, oot],
+    index_offset=i_off,
 )
 
 trs.integrate()
@@ -107,17 +141,23 @@ trs.integrate()
 def output(tr):
     tr.props['rho0'] = tr['rho'][0]
     tr.props['mass'] = tr['rho'][0]*tr.props['dvol']
-    tr.trajectory['rYE'] *= 1.2
-    tr.trajectory['rENT'] *= 1000
-    tr.trajectory['rAbar'] *= 500
+
+    #unscramble input
+    if "user_out_var3" in tr.trajectory:
+        tr.trajectory['Edot'] = tr.trajectory['Temperature']
+        tr.trajectory['Temperature'] = tr.trajectory['h']
+        tr.trajectory['h'] = tr.trajectory['u_t']
+        tr.trajectory['u_t'] = tr.trajectory['user_out_var3']
+        del tr.trajectory['user_out_var3']
+
     tr.output_to_ascii("trajectories/tracer_")
 
 do_parallel(
     output,
     trs,
-    n_cpu=n_cpu,
+    n_cpu=1,
     desc='Outputting',
     unit='tracer',
-    verbose=True,
+    verbose=verbose,
 )
-print("Done ::)")
+print(f"Proc {i_pr} done ::)", flush=True)
