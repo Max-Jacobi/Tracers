@@ -1,7 +1,8 @@
-from typing import Iterable
+from typing import Iterable, TextIO, Any
 from multiprocessing.shared_memory import SharedMemory
-import os, signal
+import os, signal, sys
 from abc import ABC, abstractmethod
+from itertools import repeat
 
 import numpy as np
 import h5py as h5
@@ -58,6 +59,7 @@ class FileInterpolator(Interpolator, ABC):
         files_per_step: int | None = None,
         use_shared_memory: float | None = None,
         verbose: bool = False,
+        outf: TextIO = sys.stdout,
         every_time: int = 1,
         every_grid: int | np.ndarray = 1,
     ):
@@ -65,6 +67,14 @@ class FileInterpolator(Interpolator, ABC):
         self.data_keys = tuple(data_keys)
         self.n_cpu = n_cpu
         self.verbose = verbose
+        self.outf = outf
+
+        self.do_parallel_kw = {
+            "n_cpu": self.n_cpu,
+            "verbose": self.verbose,
+            "file": self.outf,
+            }
+
         self.dim = len(self.vel_keys)
         implemented = ('linear', 'cubic')
         if t_int_order not in implemented:
@@ -128,7 +138,7 @@ class FileInterpolator(Interpolator, ABC):
         if self.verbose:
             print(f"Allocating shared memory for "
                   f"{self.files_per_step} files and {len(keys)} grid functions "
-                  f"using {self.req_mem/_1gb:.2f}GB of memory.", flush=True)
+                  f"using {self.req_mem/_1gb:.2f}GB of memory.", flush=True, file=self.outf)
         if free_mem < 1.2*self.req_mem:
             raise RuntimeError(f"This configuration would request to much memory. "
                                f"Free: {free_mem/_1gb}GB")
@@ -146,8 +156,10 @@ class FileInterpolator(Interpolator, ABC):
         self.shared_memory =  [{key: SharedMemory(create=True, size=self.max_size).name
                                 for key in keys} for _ in range(self.files_per_step)]
 
-    def load_file(self, args: tuple[str, dict[str, str]]) -> File:
-        return self.file_class(*args, **self.file_args)
+    @staticmethod
+    def load_file(args: tuple[str, dict[str, str], dict[str, Any], type]) -> File:
+        *args, file_args, file_class = args
+        return file_class(*args, **file_args)
 
     def load_data(
         self,
@@ -168,11 +180,15 @@ class FileInterpolator(Interpolator, ABC):
 
         self.files[:] = do_parallel(
             self.load_file,
-            list(zip((self.file_dict[t] for t in times), self.shared_memory)),
-            n_cpu=self.n_cpu,
+            list(zip(
+                (self.file_dict[t] for t in times),
+                self.shared_memory,
+                repeat(self.file_args),
+                repeat(self.file_class)
+                )),
             desc=f"Loading files for t = {t_span[0]:6f} - {t_span[1]:6f}",
             unit="files",
-            verbose=self.verbose,
+            **self.do_parallel_kw
         )
         self.files.sort(key=lambda f: f.time)
 
@@ -239,7 +255,7 @@ class FileInterpolator(Interpolator, ABC):
                     shm.close()
                     shm.unlink()
                 except FileNotFoundError:
-                    print(f"Could not find shared memory for {key}: {name}")
+                    print(f"Could not find shared memory for {key}: {name}", file=self.outf)
 
         self.shared_memory = []
 
@@ -260,6 +276,7 @@ class FileTracers(Tracers, ABC):
         every_time: int = 1,
         every_grid: int | np.ndarray = 1,
         verbose: bool = False,
+        outf: TextIO = sys.stdout,
         **kwargs,
     ):
 
@@ -275,6 +292,7 @@ class FileTracers(Tracers, ABC):
             use_shared_memory = use_shared_memory,
             every_time=every_time,
             every_grid=every_grid,
+            outf=outf,
             **self.interp_kwargs
         )
 
@@ -290,6 +308,7 @@ class FileTracers(Tracers, ABC):
             interpolator=interpolator,
             n_cpu=n_cpu,
             verbose=verbose,
+            outf=outf,
             **kwargs,
         )
 
@@ -316,7 +335,7 @@ class FileTracers(Tracers, ABC):
                 if all(tr.finished for tr in self.tracers):
                     break
         finally:
-            print("Cleaning up", flush=True)
+            print("Cleaning up", flush=True, file=self.outf)
             self.interpolator.free_shared_memory()
 
     def __del__(self):

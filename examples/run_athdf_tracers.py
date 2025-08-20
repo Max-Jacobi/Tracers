@@ -1,5 +1,8 @@
 ################################################################################
 import os
+import sys
+import atexit
+from time import sleep
 import numpy as np
 
 from tracers.athdf import AthdfTracers
@@ -7,36 +10,66 @@ from tracers import do_parallel, Tracer
 
 ################################################################################
 
+path = "new_files"
+
+n_batches = 3
+
+r_min = 500
+r_max = 2e3
+
+nr = 5 # per batch
+nphi = 36
+ntheta = 9
+
+t_start = 2e3
+t_end = 0
+r_end = 300
+
+max_dt = 100
+atmo_cut = 0.9
+rand_seed = 42
+mem_mb = 6e3 # 6GB
+verbose = True
+
+################################################################################
+
+# batch configuration
+
 try:
     i_pr = int(os.environ["SLURM_PROCID"])
     n_pr = int(os.environ["SLURM_NPROCS"])
-    n_cpu = int(os.environ["SLURM_NTASKS_PER_CORE"])
+    n_cpu = int(os.environ["SLURM_CPUS_PER_TASK"])
+    if i_pr == 0:
+        print(f"Detected SLURM setup: NPROCS={n_pr} CPUS_PER_TASK={n_cpu}", flush=True)
 except KeyError:
     i_pr = 0
     n_pr = 1
     n_cpu = 1
 
-path = "new_files"
+if len(sys.argv) > 1:
+    batch_id = int(sys.argv[1])
+else:
+    batch_id = 0
 
-t_start = 2e3 
-t_end = 0
-r_end = 300
-r_min = 500
-r_max = 0.5*t_start
 
-max_dt = 20.3
-atmo_cut = 0.9
-rand_seed = 42
-mem_mb = 6e3 # 6GB
+if n_pr > 1:
+    outf = open(f"tracer_out_{i_pr+batch_id*n_pr}.txt", "w")
+    def close_out():
+        outf.flush()
+        outf.close()
+    atexit.register(close_out)
+else:
+    outf = sys.stdout
 
-nr = 5
-nphi = 36
-ntheta = 9
+if (i_pr == 0) and (n_pr > 1):
+    print(f"Running batch {batch_id}", flush=True)
+print(f"Running batch {batch_id}", flush=True, file=outf)
 
-#nr = 1
-#nphi = 2
-#ntheta = 2
-#n_cpu = 1
+sleep(2)
+
+r_batch = np.linspace(r_min**3, r_max**3, n_batches+1)**(1/3)
+r_min = r_batch[batch_id]
+r_max = r_batch[batch_id+1]
 
 ################################################################################
 
@@ -95,7 +128,6 @@ i_end = np.array_split(np.arange(n_tr), n_pr)[i_pr][-1]
 print(f"Calculating tracers {i_off}-{i_end} on rank {i_pr}", flush=True)
 if n_pr > 1:
     seeds = {k: np.array_split(v, n_pr)[i_pr] for k, v in seeds.items()}
-verbose = i_pr == 0
 
 ################################################################################
 
@@ -133,7 +165,8 @@ trs = AthdfTracers(
     spherical=True,
     bitant=True,
     events=[oob, oot],
-    index_offset=i_off,
+    index_offset=i_off+batch_id*n_tr,
+    outf=outf,
 )
 
 trs.integrate()
@@ -160,5 +193,7 @@ do_parallel(
     desc='Outputting',
     unit='tracer',
     verbose=verbose,
+    file=outf,
 )
-print(f"Proc {i_pr} done ::)", flush=True)
+print(f"Done ::)", flush=True, file=outf)
+print(f"Proc {i_pr} done", flush=True)

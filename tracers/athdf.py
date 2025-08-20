@@ -188,11 +188,11 @@ class AthdfInterpolator(FileInterpolator):
         fnames = [ff.path for ff in os.scandir(path) if ff.name.endswith('.athdf')]
 
         res = do_parallel(
-            read_time, list(zip(fnames, repeat(self.vel_keys+self.data_keys))),
-            n_cpu=self.n_cpu,
+            read_time,
+            list(zip(fnames, repeat(self.vel_keys+self.data_keys))),
             desc="Parsing file times",
             unit="files",
-            verbose=self.verbose,
+            **self.do_parallel_kw
             )
 
         def combine_dict(do, dn):

@@ -1,6 +1,7 @@
-from typing import Callable, Any, Iterable, Iterator, Any, Sequence
+from typing import Callable, Any, Iterable, Iterator, Any, Sequence, TextIO
 from collections.abc import  Mapping
 from abc import ABC, abstractmethod
+import sys
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -119,8 +120,9 @@ class Tracer(Mapping):
         for key, dd in self.trajectory.items():
             if len(dd) != len(tsort):
                 incmp = True
-                print(f"Warning for tracer_{self.id}: len({key}):{len(dd)} /= len(time):{len(tsort)}")
-                print(f"Message: {self.message}")
+                print(f"Warning for tracer_{self.id}: len({key}):{len(dd)} /= len(time):{len(tsort)}",
+                      file=self.outf)
+                print(f"Message: {self.message}", file=self.outf)
         if incmp:
             return "failed"
 
@@ -197,6 +199,7 @@ class Tracers:
         timeout: float = -1.0,
         events: list[Callable] = [],
         index_offset: int = 0,
+        outf: TextIO = sys.stdout,
         **kwargs,
     ):
         self.coord_keys = interpolator.coord_keys
@@ -209,8 +212,15 @@ class Tracers:
         self.timeout = timeout
         self.t_eval = t_eval
         self.index_offset = index_offset
+        self.outf = outf
         self.kwargs = kwargs
         self.kwargs['events'] = events
+
+        self.do_parallel_kw = {
+            "n_cpu": self.n_cpu,
+            "verbose": self.verbose,
+            "file": self.outf,
+            }
 
         assert all(key in self.seeds.keys() for key in self.coord_keys), \
             f"Seed coordinates do not match Tracers coordinates {self.coord_keys}"
@@ -235,13 +245,14 @@ class Tracers:
         args: tuple[
             Tracer,
             tuple[float, float],
-            Interpolator,
+            Callable,
+            tuple,
             dict,
             (None | np.ndarray),
             float,
         ]
     ) -> Tracer:
-        tracer, t_span, interpolator, kwargs, t_eval, timeout = args
+        tracer, t_span, interp, data, kwargs, t_eval, timeout = args
 
         if min(*t_span) < tracer.t_start <= max(*t_span):
             tracer.started = True
@@ -257,16 +268,16 @@ class Tracers:
 
         try:
             sol = to(timeout)(solve_ivp)(
-                interpolator.interpolate_velocities,
+                interp,
                 t_span=t_span,
                 first_step=first_step,
                 y0=tracer.pos,
-                args=(interpolator.data,),
+                args=(data,),
                 dense_output=True,
                 **kwargs
             )
             if t_eval is None:
-                t_eval= sol.t
+                t_eval = sol.t
             tracer.update_trajectory(sol, events=kwargs['events'], t_eval=t_eval)
         except (InterpolationError, TimeoutError) as er:
             tracer.handle_error(er)
@@ -277,28 +288,35 @@ class Tracers:
         t_span: tuple[float, float],
     ) -> None:
 
-        args = [(tracer, t_span, self.interpolator, self.kwargs, self.t_eval, self.timeout) for tracer in self.tracers]
+        args = [(
+            tracer,
+            t_span,
+            self.interpolator.interpolate_velocities,
+            self.interpolator.data,
+            self.kwargs,
+            self.t_eval,
+            self.timeout
+            ) for tracer in self.tracers]
         self.tracers = do_parallel(
             func=self._integrate_inner,
             args=args,
             desc=f"Integrating t = {t_span[0]:6f} - {t_span[1]:6f}",
             unit='tracers',
-            n_cpu=self.n_cpu,
-            verbose=self.verbose,
+            **self.do_parallel_kw
         )
 
     @staticmethod
     def _interpolate_inner(
-        args: tuple[Tracer, Interpolator, float],
+        args: tuple[Tracer, Callable, tuple, float],
     ) -> Tracer:
-        tracer, interpolator, timeout = args
-        i_new = len(tracer.trajectory[interpolator.data_keys[0]])
+        tracer, interp, intdata, timeout = args
+        i_new = len(tracer.trajectory[tracer.data_keys[0]])
 
         for tt, *pos in zip(*(tracer.trajectory[key][i_new:]
-                              for key in ("time", *interpolator.coord_keys))):
+                              for key in ("time", *tracer.coord_keys))):
             try:
-                data = to(timeout)(interpolator.interpolate_data)(tt, np.array(pos), interpolator.data)
-                for key, value in zip(interpolator.data_keys, data):
+                data = to(timeout)(interp)(tt, np.array(pos), intdata)
+                for key, value in zip(tracer.data_keys, data):
                     tracer.trajectory[key] = np.append(tracer.trajectory[key], value)
             except (InterpolationError, TimeoutError) as er:
                 for key in tracer.trajectory.keys():
@@ -312,14 +330,18 @@ class Tracers:
     ):
         if len(self.interpolator.data_keys) == 0:
             return
-        args = [(tracer, self.interpolator, self.timeout) for tracer in self.tracers]
+        args = [(
+            tracer,
+            self.interpolator.interpolate_data,
+            self.interpolator.data,
+            self.timeout,
+            ) for tracer in self.tracers]
         self.tracers = do_parallel(
             func=self._interpolate_inner,
             args=args,
             desc=f"Interpolating t = {t_span[0]:6f} - {t_span[1]:6f}",
             unit='tracers',
-            n_cpu=self.n_cpu,
-            verbose=self.verbose,
+            **self.do_parallel_kw
         )
 
 
@@ -330,8 +352,7 @@ class Tracers:
                 args=self.tracers,
                 desc=f"Checking condition {ii+1}/{len(self.end_conditions)}",
                 unit='tracers',
-                n_cpu=self.n_cpu,
-                verbose=self.verbose,
+                **self.do_parallel_kw
             )
 
         if self.verbose:
@@ -340,7 +361,8 @@ class Tracers:
             finished = sum(tr.finished and not tr.failed
                            for tr in self.tracers)
             failed = sum(tr.failed for tr in self.tracers)
-            print(f"running: {running}, finished: {finished}, failed: {failed}")
+            print(f"running: {running}, finished: {finished}, failed: {failed}",
+                  file=self.outf, flush=True)
 
 
     def take_step(self, t_span: tuple[float, float]) -> None:

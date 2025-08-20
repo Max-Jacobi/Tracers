@@ -126,6 +126,7 @@ class FLASHInterpolator(FileInterpolator):
             desc="Parsing file times",
             unit="files",
             verbose=self.verbose,
+            outf=self.outf,
             )
 
         return np.array(files), np.array(times), mem_size

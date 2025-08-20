@@ -11,6 +11,11 @@ from .utils import do_parallel
 
 _2pi = 2*np.pi
 
+def _read_time(fpath):
+    with h5.File(fpath, 'r') as f:
+        files.append(fpath)
+        times.append(float(f['coordinates/00/T'][:]))
+
 def _fill_with_ghosts(buf: np.ndarray, h5f: h5.File, key: str, ng: int = 1, ev: np.ndarray = np.ones(3, dtype=int)):
     ar = np.array(h5f[key][:])
     nphi = ar.shape[1]
@@ -87,17 +92,13 @@ class SurfaceInterpolator(FileInterpolator):
         times: list[float] = []
 
         fnames = [ff.path for ff in os.scandir(path) if 'surface' in ff.name]
-        def read_time(fpath):
-            with h5.File(fpath, 'r') as f:
-                files.append(fpath)
-                times.append(float(f['coordinates/00/T'][:]))
 
         do_parallel(
-            read_time, fnames,
-            n_cpu=1,
+            _read_time,
+            fnames,
             desc="Parsing file times",
             unit="files",
-            verbose=self.verbose,
+            **self.do_parallel_kw
             )
 
         self.grid = self.load_grid(files[0], every=self.every_grid)

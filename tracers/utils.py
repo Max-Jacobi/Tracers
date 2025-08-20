@@ -14,7 +14,6 @@ def _get_pool(n_cpu):
     """
     global _pool, _n_cpu
     if _pool is None:
-        # print(f"Spawning pool with {n_cpu} workers")
         _pool = Pool(n_cpu)
         _n_cpu = n_cpu
         atexit.register(cleanup_pool)
@@ -60,10 +59,10 @@ def do_parallel(
     verbose: bool = False,
     **kwargs
 ):
-    kwargs["total"]   = len(args)
-    kwargs["disable"] = not verbose
-    kwargs["ncols"]   = 0
-    kwargs["file"]    = stdout
+    kwargs.setdefault("total", len(args))
+    kwargs.setdefault("disable", not verbose)
+    kwargs.setdefault("ncols", 0)
+    kwargs.setdefault("file", stdout)
 
     if n_cpu == 1:
         return list(tqdm(map(func, args), **kwargs))
