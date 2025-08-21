@@ -89,10 +89,10 @@ class AthdfFile(File):
                 # unravel ghost zone theta
                 sth = np.abs(np.sin(th))
 
-                gam = [sth*sth*r2, r2, (1-2*mass/rr)**-0.5]
+                gam = [sth*sth*r2, r2, (1-2*mass/rr)**-1]
             else:
                 rr = np.sqrt(sum(x*x for x in coords))
-                gam = 3*[(1-2*mass/rr)**-0.5]
+                gam = 3*[(1-2*mass/rr)**-1]
 
             W = np.sqrt(1 + sum(u[imb]*u[imb]*g for u, g in zip(vel, gam)))
             for i in range(3):

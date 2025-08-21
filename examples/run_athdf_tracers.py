@@ -101,11 +101,12 @@ if dt>0:
 
 ################################################################################
 
-np.random.seed(rand_seed)
-time += np.random.uniform(-0.5, 0.5, size=time.shape)*dt
-rr += np.random.uniform(-0.5, 0.5, size=rr.shape)*dr
-phi += np.random.uniform(-0.5, 0.5, size=phi.shape)*dphi
-cost += np.random.uniform(-0.5, 0.5, size=cost.shape)*dct
+rng = np.random.default_rng(rand_seed)
+
+time += rng.uniform(-0.5, 0.5, size=time.shape)*dt
+rr += rng.uniform(-0.5, 0.5, size=rr.shape)*dr
+phi += rng.uniform(-0.5, 0.5, size=phi.shape)*dphi
+cost += rng.uniform(-0.5, 0.5, size=cost.shape)*dct
 
 time = time.flatten()
 rr = rr.flatten()
@@ -127,7 +128,8 @@ i_off = np.array_split(np.arange(n_tr), n_pr)[i_pr][0]
 i_end = np.array_split(np.arange(n_tr), n_pr)[i_pr][-1]
 print(f"Calculating tracers {i_off}-{i_end} on rank {i_pr}", flush=True)
 if n_pr > 1:
-    seeds = {k: np.array_split(v, n_pr)[i_pr] for k, v in seeds.items()}
+    perm = rng.permutation(n_tr)
+    seeds = {k: np.array_split(v[perm], n_pr)[i_pr] for k, v in seeds.items()}
 
 ################################################################################
 
