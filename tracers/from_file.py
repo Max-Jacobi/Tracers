@@ -315,6 +315,8 @@ class FileTracers(Tracers, ABC):
         if reverse:
             self.times = self.interpolator.times[::-1]
             max_t = self.seeds['time'].max()
+            if self.times.max() < max_t:
+                raise ValueError(f"Max time found in files ({self.times.max()}) < max seed time ({self.seeds['time'].max()})")
             max_t = self.times[self.times >= max_t][-1]
             self.times = self.times[self.times <= max_t]
         else:
@@ -325,9 +327,10 @@ class FileTracers(Tracers, ABC):
 
     def integrate(self):
         start_times = self.times[:-self.step:self.step]
-        start_times = np.append(start_times, self.times[-self.step])
         end_times = self.times[self.step::self.step]
-        end_times = np.append(end_times, self.times[-1])
+        if end_times[-1] != self.times[-1]:
+            start_times = np.append(start_times, end_times[-1])
+            end_times = np.append(end_times, self.times[-1])
 
         try:
             for t_span in zip(start_times, end_times):
