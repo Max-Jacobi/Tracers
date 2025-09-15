@@ -10,28 +10,31 @@ from tracers import do_parallel, Tracer
 
 ################################################################################
 
-path = "new_files"
+path = "path/to/athdf_files"
+save_path = "path/to/output"
 
 n_batches = 3
 
+t_start = 2e5
 r_min = 500
-r_max = 2e3
+r_max = 1.8e5 # up to 0.9c
 
 nr = 5 # per batch
 nphi = 36
 ntheta = 9
 
-t_start = 2e3
 t_end = 0
 r_end = 300
 
-max_dt = 100
-atmo_cut = 0.9
-rand_seed = 42
+max_dt = 200
+atmo_cut = 0.95
+random_seed = 42
 mem_mb = 6e3 # 6GB
 verbose = True
 
 ################################################################################
+
+os.makedirs(save_path, exist_ok=True)
 
 # batch configuration
 
@@ -67,7 +70,7 @@ print(f"Running batch {batch_id}", flush=True, file=outf)
 
 sleep(2)
 
-r_batch = np.linspace(r_min**3, r_max**3, n_batches+1)**(1/3)
+r_batch = np.geomspace(r_min, r_max, n_batches+1)
 r_min = r_batch[batch_id]
 r_max = r_batch[batch_id+1]
 
@@ -78,30 +81,27 @@ r_max = r_batch[batch_id+1]
 time = np.array([t_start])
 dt = 0
 
-rr = np.linspace(r_min**3, r_max**3, nr+1)**(1/3)
+rr = np.geomspace(r_min, r_max, nr+1)
 dr = np.diff(rr)
-rr = rr[:-1]
-rr += dr/2
+rr = rr[:-1] + dr/2
 
-phi = np.linspace(0, 2*np.pi, nphi+1)[:-1]
+phi = np.linspace(0, 2*np.pi, nphi+1)
 dphi = phi[1] - phi[0]
-phi += dphi/2
+phi = phi[:-1] + dphi/2
 
-cost = np.linspace(0, 1, ntheta+1)[:-1]
+cost = np.linspace(0, 1, ntheta+1)
 dct = cost[1] - cost[0]
-cost += dct/2
+cost = cost[:-1] + dct/2
 
-# time first so tracers with similar start times are started on the same rank
 time, rr, phi, cost = np.meshgrid(time, rr, phi, cost, indexing='ij')
-dr = dr[None, :, None, None]
 
+dr = dr[None, :, None, None]
 dvol = rr**2 * dr*dct*dphi
-if dt>0:
-    dvol *= dt
 
 ################################################################################
+# randomly shift in each cell for uniform distribution
 
-rng = np.random.default_rng(rand_seed)
+rng = np.random.default_rng(random_seed)
 
 time += rng.uniform(-0.5, 0.5, size=time.shape)*dt
 rr += rng.uniform(-0.5, 0.5, size=rr.shape)*dr
@@ -123,6 +123,9 @@ seeds = dict(
     dvol=dvol,
 )
 
+################################################################################
+# distribute tracers to processes
+
 n_tr = len(rr)
 i_off = np.array_split(np.arange(n_tr), n_pr)[i_pr][0]
 i_end = np.array_split(np.arange(n_tr), n_pr)[i_pr][-1]
@@ -132,8 +135,8 @@ if n_pr > 1:
     seeds = {k: np.array_split(v[perm], n_pr)[i_pr] for k, v in seeds.items()}
 
 ################################################################################
+# end integration at domain bounderies
 
-# domain bounderies
 def oob(t: float, x: np.ndarray, *_) -> float:
     r = np.sqrt(np.sum(x**2))
     return r - r_end
@@ -146,6 +149,7 @@ def oot(t: float, *_) -> float:
 oot.direction = -1
 oot.terminal = True
 
+# atmosphere flag
 def check_flag(tr: Tracer) -> Tracer:
     if np.any(tr.trajectory['rFlag'] < atmo_cut):
         tr.finished = tr.failed = True
@@ -156,7 +160,8 @@ def check_flag(tr: Tracer) -> Tracer:
 
 trs = AthdfTracers(
     path,
-    data_keys=['rho', 'rYE', 'rENT', 'rAbar', 'rFlag', 'Temperature', "h", "u_t", "user_out_var3"],
+    data_keys=['rho', 'rYE', 'rENT', 'rAbar', 'rFlag',
+               'Temperature', "h", "u_t", "user_out_var3"],
     seeds=seeds,
     n_cpu=n_cpu,
     verbose=verbose,
@@ -173,7 +178,6 @@ trs = AthdfTracers(
 
 trs.integrate()
 
-
 def output(tr):
     tr.props['rho0'] = tr['rho'][0]
     tr.props['mass'] = tr['rho'][0]*tr.props['dvol']
@@ -186,7 +190,7 @@ def output(tr):
         tr.trajectory['u_t'] = tr.trajectory['user_out_var3']
         del tr.trajectory['user_out_var3']
 
-    tr.output_to_ascii("trajectories/tracer_")
+    tr.output_to_ascii(f"{save_path}/tracer_")
 
 do_parallel(
     output,
