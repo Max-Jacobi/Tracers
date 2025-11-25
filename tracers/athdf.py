@@ -27,7 +27,7 @@ def _rotjac(theta, phi):
 class AthdfFile(File):
     coord_keys = ('x3', 'x2', 'x1')
     vel_keys = ('vel3', 'vel2', 'vel1')
-    kwargs = ("bitant", "spherical", "gr", "mass")
+    kwargs = ("bitant", "spherical", "gr", "mass", "log_keys")
 
     def __init__(
         self,
@@ -37,12 +37,14 @@ class AthdfFile(File):
         spherical: bool = False,
         gr: bool = False,
         mass: float = 0,
+        log_keys: tuple[str, ...] = [],
     ):
 
         self.filenames = filenames
         self.shared_memory = shm_names
         self.bitant = bitant
         self.spherical = spherical
+        self.log_keys = log_keys
 
         for filename, keys in self.filenames.items():
             with h5.File(filename, 'r') as f:
@@ -73,7 +75,10 @@ class AthdfFile(File):
                     shm = SharedMemory(name=self.shared_memory[key])
                     data: np.ndarray = np.ndarray(self.full_shape, dtype=float, buffer=shm.buf)
                     j = vars_in_file.index(key)
-                    data[:] = f[dset][j]
+                    if key in self.log_keys:
+                        data[:] = np.log(f[dset][j])
+                    else:
+                        data[:] = f[dset][j]
 
         if gr:
             self.transform_Wv(mass)
@@ -144,6 +149,8 @@ class AthdfFile(File):
                 grid, ar[imb],
                 bounds_error=False, fill_value=None
                 )(x, method='linear')
+            if key in self.log_keys:
+                res[ii] = np.exp(res[ii])
 
         if self.spherical and keys==AthdfInterpolator.vel_keys:
             jac = _rotjac(theta, phi)

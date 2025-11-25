@@ -49,6 +49,7 @@ class FileInterpolator(Interpolator, ABC):
     vel_keys: tuple[str, ...]
     data: tuple
     file_class: type
+    file_args: dict = {}
 
     def __init__(
         self,

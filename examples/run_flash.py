@@ -15,13 +15,13 @@ from matplotlib.animation import FuncAnimation
 
 time = 0.4
 sq_rmax = 4e14 # rmax = 2e7cm
-x = np.linspace(0, 1e8, 30)
-y = np.linspace(-0.8e8, 1.7e8, 30)
+x = np.linspace(0, 1e8, 5)
+y = np.linspace(-0.8e8, 1.7e8, 5)
 x, y = np.meshgrid(x, y)
 mask = (x*x + y*y) > sq_rmax
 x, y = x[mask], y[mask]
 
-seeds = dict(x=x, y=y, time=np.ones_like(x)*0.4)
+seeds = dict(x=x, y=y, time=np.ones_like(x)*time)
 
 # domain bounderies
 def out_of_bounds_inner(t: float, x: np.ndarray, *_) -> float:
@@ -35,7 +35,7 @@ out_of_time.direction = -1
 out_of_time.terminal = True
 
 def check_temp(tr):
-    if np.any(tr.trajectory['temp'] > 10):
+    if np.any(tr.trajectory['temp'] > 10e9):
         tr.finished = tr.failed = True
         tr.message = "Temperature reached 10GK"
     return tr
